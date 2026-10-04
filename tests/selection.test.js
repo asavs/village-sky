@@ -18,7 +18,7 @@ test("unloaded label textures can be disposed during fast navigation", () => {
 test("a late card request cannot reopen after leaving and returning to the same turn", async () => {
   let resolve;
   const pendingText = new Promise(r => { resolve = r; });
-  const context = vm.createContext({ selected: 1, textOf: () => pendingText });
+  const context = vm.createContext({ selected: 1, textOf: () => pendingText, memeOf: null });
   vm.runInContext(cardSource, context);
   const pending = vm.runInContext("openCard(1)", context);
   vm.runInContext("++cardRun; selected = 1", context);

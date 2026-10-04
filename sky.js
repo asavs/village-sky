@@ -11,6 +11,8 @@ import { MOTION_RATE, damp as ease, dampAngle, sameLens, browseLens } from "./mo
 const SPREAD = 60, DEPTH = 400;
 let tau = 10;                                   // overview tau, days: [ and ] change it
 
+// meme families (tools/memes.py) are an extra: without them the sky still opens
+const memeRequest = fetchData("data/meme_of_star.bin", "arrayBuffer", true).catch(() => null);
 let dataset;
 try {
   dataset = await Promise.all([
@@ -27,6 +29,7 @@ const [meta, starBuf, colorBuf, edgeBuf, echoIndexBuf, echoSimBuf, contextBuf, c
 const t0 = Date.parse(meta.first.replace(" ", "T") + "Z");
 const n = meta.count, stars = new Float32Array(starBuf), rgbs = new Uint8Array(colorBuf);
 const daysOf = i => stars[i * 4 + 2];
+const memeBuf = await memeRequest, memeOf = memeBuf?.byteLength === n * 4 ? new Int32Array(memeBuf) : null;
 document.getElementById("counts").textContent =
   `${n.toLocaleString()} turns · ${meta.speakers.length} speakers · ${meta.first.slice(0, 10)} to ${meta.last.slice(0, 10)}`;
 
@@ -515,6 +518,7 @@ addEventListener("keydown", e => {
   else if ((k === "enter" || k === " ") && cursor >= 0) { e.preventDefault(); focus(labels[cursor].j); }
   else if (k === "f" && selected >= 0 && zoomed) turnAround();
   else if (k === "m" && selected >= 0) moreLike(selected);
+  else if (k === "e" && selected >= 0 && memeOf?.[selected] >= 0) lightMeme(selected);
   else if (k === "z") toggleZoom();
   else if ((k === "[" || k === "]") && selected < 0) { tau = Math.min(3650, Math.max(1 / 86400, tau * (k === "]" ? 1.5 : 1 / 1.5))); setLens(overviewLens()); }
   else if (k === "[" || k === "]") uniforms.uDim.value = Math.min(1, Math.max(0.02, uniforms.uDim.value * (k === "]" ? 1.4 : 1 / 1.4)));
@@ -627,6 +631,53 @@ async function moreLike(i) {
     searchCount.textContent = `${found.order.length} most similar`;
   } catch (error) { searchFailed(run, error); }
 }
+// Meme families: sentences clustered across speakers by tools/memes.py, fetched on first use. Each carrier
+// names the earlier carrier it could have come from (fewest hand-offs, then hops), or none: a root.
+let memes = null;
+async function loadMemes() {
+  memes ??= fetchData("data/memes.json", "json").then(m => {
+    if (!Array.isArray(m?.families) || m.families.some((f, k) => f.id !== k || f.carriers.length !== f.could_have_come_from.length))
+      throw new Error("Meme families do not match this dataset");
+    return m;
+  }).catch(error => { memes = null; throw error; });
+  return memes;
+}
+const clip = (s, k) => s.length > k ? s.slice(0, k).trimEnd() + "…" : s;
+// Lift compares carriers with an other-speaker earlier carrier within 3 hops against time-matched random
+// swaps. The median family sits at 1.0: sharing a room explains most families, task-state ones included.
+function liftReading(lift) {
+  if (lift == null) return "lift unknown";
+  const reading = lift >= 1.2 ? "spread beyond co-presence?" : lift >= 0.9 ? "no more than co-presence" : "less than chance";
+  return `lift ${lift.toFixed(2)}: ${reading}`;
+}
+// E: light the open turn's family. Carriers are hits (roots brightest); the thread is the cascade, each
+// carrier joined to the one it could have come from, wider and brighter the fewer fresh hops between them.
+async function lightMeme(i) {
+  const run = resetSearch();
+  searchTarget = 1;
+  seek.classList.add("open");
+  searchCount.textContent = "loading meme families…";
+  try {
+    const f = (await loadMemes()).families[memeOf[i]];
+    if (run !== searchRun) return;
+    hits = f.carriers.slice();
+    hitOrder = hits.slice().sort((a, b) => a - b);
+    let threads = 0;
+    f.carriers.forEach((c, k) => {
+      const from = f.could_have_come_from[k];
+      hit[c] = from < 0 ? 1 : 0.6;
+      if (from < 0 || threads >= CONSTELLATION) return;
+      const strength = Math.max(0.12, Math.exp(-(Math.max(1, f.hops[k]) - 1) / 3));
+      constellation.set(threads++, from, c, speakerColor(c).map(v => v * (0.2 + 0.6 * strength)), 1 + 3 * strength);
+    });
+    hitAttr.needsUpdate = true;
+    constellation.show(threads);
+    if (params.has("reveal")) uniforms.uSearch.value = 1;
+    searchBox.value = `◆ meme: ${clip(f.phrase.replace(/\s+/g, " "), 40)}`;
+    searchCount.textContent = `${f.carriers.length} carriers · ${f.roots} root${f.roots === 1 ? "" : "s"} · ` +
+      `${f.speakers.length} speakers · ${f.cross_model_jumps} cross-model jumps · ${liftReading(f.lift)} · threads: could have come from`;
+  } catch (error) { searchFailed(run, error); }
+}
 function resetSearch() {
   clearTimeout(searchTimer);
   ++searchRun;
@@ -684,7 +735,7 @@ similarButton.addEventListener("click", () => {
   similarOn = !similarOn;
   similarButton.classList.toggle("on", similarOn);
   similarButton.setAttribute("aria-pressed", String(similarOn));
-  if (searchBox.value && !searchBox.value.startsWith("≈")) search(searchBox.value);
+  if (searchBox.value && !/^[≈◆]/.test(searchBox.value)) search(searchBox.value);
 });
 let searchTimer = 0;
 searchBox.addEventListener("input", () => {
@@ -906,7 +957,7 @@ const cardMaterial = (map, o) => new THREE.ShaderMaterial({
 const quad = new THREE.PlaneGeometry(1, 1);
 
 // draw text into a canvas at 2x: a header line in the model's colour, a dim meta line, then wrapped body
-const INK = "#e8e4dc", DIM = "#8a8478", FONT = 'ui-monospace, "Cascadia Mono", Consolas, monospace';
+const INK = "#e8e4dc", DIM = "#8a8478", TAG = "#e0c98f", FONT = 'ui-monospace, "Cascadia Mono", Consolas, monospace';
 function wrap(ctx, text, width) {
   const out = [];
   for (const para of text.split("\n")) {
@@ -925,7 +976,15 @@ function wrap(ctx, text, width) {
   }
   return out;
 }
-function textCanvas({ head, headColor, meta, body, width, maxLines, pad = 28 }) {
+// a tag is [before, quote, after]: the quote gives up its end so the counts after it always fit
+function fitTag(ctx, [before, quote, after], width) {
+  for (let k = quote.length; k > 8; k--) {
+    const line = before + (k < quote.length ? quote.slice(0, k).trimEnd() + "…" : quote) + after;
+    if (ctx.measureText(line).width <= width) return line;
+  }
+  return before + quote.slice(0, 8) + "…" + after;
+}
+function textCanvas({ head, headColor, meta, tag, body, width, maxLines, pad = 28 }) {
   const c = document.createElement("canvas"), ctx = c.getContext("2d");
   const big = `600 28px ${FONT}`, small = `22px ${FONT}`, text = `25px ${FONT}`;
   ctx.font = big;
@@ -934,10 +993,11 @@ function textCanvas({ head, headColor, meta, body, width, maxLines, pad = 28 }) 
   let lines = body ? wrap(ctx, body, inner) : [];
   if (lines.length > maxLines) { lines = lines.slice(0, maxLines); lines[maxLines - 1] += " …"; }
   c.width = inner + 2 * pad;
-  c.height = pad * 2 + 34 + (meta ? 32 : 0) + (lines.length ? 12 + lines.length * 34 : 0);
+  c.height = pad * 2 + 34 + (meta ? 32 : 0) + (tag ? 32 : 0) + (lines.length ? 12 + lines.length * 34 : 0);
   let y = pad + 26;
   ctx.font = big; ctx.fillStyle = headColor; ctx.fillText(head, pad, y);
   if (meta) { y += 32; ctx.font = small; ctx.fillStyle = DIM; ctx.fillText(meta, pad, y); }
+  if (tag) { y += 32; ctx.font = `20px ${FONT}`; ctx.fillStyle = TAG; ctx.fillText(fitTag(ctx, tag, inner), pad, y); }
   if (lines.length) { y += 12; ctx.font = text; ctx.fillStyle = INK; for (const l of lines) { y += 34; ctx.fillText(l, pad, y); } }
   const texture = new THREE.CanvasTexture(c);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -957,13 +1017,17 @@ async function openCard(i, preserve = false) {
     retained.mesh.material.uniforms.uTextAlpha.value = 0; // don't show the previous turn while loading
     retained.mesh.material.uniforms.uColor.value.setRGB(...speakerColor(i));
   }
-  let t;
-  try { t = await textOf(i); }
+  // its meme family, if it has one; a family file that fails to load just leaves the line off
+  const family = memeOf?.[i] >= 0 ? loadMemes().then(m => m.families[memeOf[i]], () => null) : null;
+  let t, f;
+  try { t = await textOf(i); f = await family; }
   catch (error) { if (run === cardRun && selected === i) textFailed(i, error); return; }
   if (run !== cardRun || selected !== i) return;
   const color = speakerColor(i);
+  const tag = f && ['meme · "', f.phrase.replace(/\s+/g, " "),
+    `" · ${f.carriers.length} messages · ${f.speakers.length} speakers · E`];
   const { texture, w, h } = textCanvas({ head: t.speaker, headColor: rgbOf(color), meta: `${t.time} UTC · #${t.room}`,
-    body: t.text, width: 920, maxLines: 22 });
+    tag, body: t.text, width: 920, maxLines: 22 });
   const unit = focusDistance / (renderer.domElement.clientHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)));
   const cardPixels = Math.min(460, innerWidth * 0.8, innerHeight * 0.65 * w / h);
   const width = cardPixels * unit, height = width * h / w, margin = 18 * unit, gap = 10 * unit;
@@ -1218,7 +1282,10 @@ addEventListener("resize", () => {
   camera.updateProjectionMatrix();
   if (selected >= 0) openCard(selected, true);
 });
-if (params.has("open")) { zoomed = params.has("zoom"); focus(Number(params.get("open"))); }
+if (params.has("open")) {
+  zoomed = params.has("zoom"); focus(Number(params.get("open")));
+  if (params.has("meme") && memeOf?.[selected] >= 0) lightMeme(selected);
+}
 
 const when = document.getElementById("when");
 let previous = performance.now();
@@ -1252,7 +1319,7 @@ renderer.setAnimationLoop(now => {
   if (selected >= 0) when.textContent = new Date(t0 + daysOf(selected) * 86400000).toISOString().slice(0, 16).replace("T", " ") +
     (zoomed ? "  · zoomed into its moment · F view · Z back out" : "  · Z zoom into its moment") +
     (hitOrder.length ? " · ← → matches · shift ← → its day" : " · ← → its day") +
-    " · ↑ what it read · ↓ who read it · M more like this · Tab labels · Backspace back · [ ] dim · I details · Esc sky";
+    " · ↑ what it read · ↓ who read it · M more like this" + (memeOf?.[selected] >= 0 ? " · E its meme family" : "") + " · Tab labels · Backspace back · [ ] dim · I details · Esc sky";
   else {
     const l = overviewLens(), z = Math.min(0, cam.z - 20);
     const d = Math.max(0, Math.min(meta.days, l.anchor - l.tau * Math.expm1(-z / l.scale)));

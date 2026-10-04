@@ -93,7 +93,7 @@ test("zoomed arrow steps retain scale, framing, and the pending camera offset", 
 function cardHarness(textOf) {
   const textures = [];
   const ctx = vm.createContext({
-    THREE, selected: 0, textOf, params: new URLSearchParams(), scene: new THREE.Scene(),
+    THREE, selected: 0, textOf, memeOf: null, params: new URLSearchParams(), scene: new THREE.Scene(),
     ribbonUniforms: { uResolution: { value: new THREE.Vector2(800, 600) } }, uniforms: { uFog: { value: 160 } },
     speakerColor: i => i ? [0, 1, 0] : [1, 0, 0], rgbOf: () => "white", position: new Float32Array(12),
     renderer: { domElement: { clientHeight: 600 } }, camera: { fov: 60 }, focusDistance: 32, innerWidth: 800, innerHeight: 600,

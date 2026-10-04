@@ -73,3 +73,10 @@ test("nearest results exclude the seed even for a tiny dataset", async () => {
   const result = await h.evaluate("nearest(new Float32Array(96), new Set([0]))");
   assert.deepEqual(Array.from(result.order), [1]);
 });
+
+test("meme lift is read plainly at the stated thresholds", () => {
+  const h = harness();
+  assert.equal(h.evaluate("liftReading(1.2)"), "lift 1.20: spread beyond co-presence?");
+  assert.equal(h.evaluate("liftReading(0.944)"), "lift 0.94: no more than co-presence");
+  assert.equal(h.evaluate("liftReading(0.89)"), "lift 0.89: less than chance");
+});
