@@ -483,6 +483,7 @@ addEventListener("keydown", e => {
   else if (k === "tab") { e.preventDefault(); cycle(e.shiftKey ? -1 : 1); }
   else if ((k === "enter" || k === " ") && cursor >= 0) { e.preventDefault(); focus(labels[cursor].j); }
   else if (k === "f" && selected >= 0 && zoomed) turnAround();
+  else if (k === "m" && selected >= 0) moreLike(selected);
   else if (k === "z") toggleZoom();
   else if ((k === "[" || k === "]") && selected < 0) { tau *= k === "]" ? 1.5 : 1 / 1.5; setLens(overviewLens()); }
   else if (k === "[" || k === "]") uniforms.uDim.value = Math.min(1, Math.max(0.02, uniforms.uDim.value * (k === "]" ? 1.4 : 1 / 1.4)));
@@ -539,6 +540,55 @@ function stepHits(direction) {
   if (j !== undefined) focus(j, true, selected >= 0);
   return true;
 }
+// Similar in meaning: the 96-dim PCA vectors (int8, loaded on first use). A seed vector, either the mean
+// of the keyword matches or one turn's own, is scanned against every message; the nearest SIMILAR light up,
+// dimmer than exact matches by how close they are, and join the constellation.
+const SIMILAR = 600, DIMS = 96;
+let vectors = null, similarOn = false;
+const similarButton = document.getElementById("similar");
+async function loadVectors() {
+  vectors ??= fetch("data/vectors.bin").then(r => r.arrayBuffer()).then(b => new Int8Array(b));
+  return vectors;
+}
+async function nearest(seed, exclude) {
+  const v = await loadVectors(), scores = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let d = 0;
+    for (let k = 0, o = i * DIMS; k < DIMS; k++) d += seed[k] * v[o + k];
+    scores[i] = exclude.has(i) ? -1e9 : d;
+  }
+  const order = Uint32Array.from({ length: n }, (_, i) => i).sort((a, b) => scores[b] - scores[a]).slice(0, SIMILAR);
+  return { order, scores };
+}
+async function seedOf(stars_) {
+  const v = await loadVectors(), seed = new Float32Array(DIMS);
+  for (const i of stars_.slice(0, 2000)) for (let k = 0; k < DIMS; k++) seed[k] += v[i * DIMS + k];
+  const norm = Math.hypot(...seed) || 1;
+  return seed.map(x => x / norm);
+}
+function lightSimilar({ order, scores }) {
+  const top = scores[order[0]], low = scores[order[order.length - 1]];
+  for (const j of order) {
+    hit[j] = Math.max(hit[j], 0.3 + 0.55 * (scores[j] - low) / Math.max(1e-6, top - low));
+    hits.push(j);
+  }
+  hitAttr.needsUpdate = true;
+  drawConstellation();
+}
+// M: more like this open turn, across all time
+async function moreLike(i) {
+  const run = ++searchRun;
+  hit.fill(0); hits = [i]; hit[i] = 1;
+  searchTarget = 1;
+  const t = await textOf(i);
+  searchBox.value = `≈ ${t.speaker} ${t.time.slice(0, 10)}`;
+  seek.classList.add("open");
+  searchCount.textContent = "finding similar…";
+  const found = await nearest(await seedOf([i]), new Set([i]));
+  if (run !== searchRun) return;
+  lightSimilar(found);
+  searchCount.textContent = `${SIMILAR} most similar`;
+}
 async function search(query) {
   const run = ++searchRun, words = query.toLowerCase().split(/\s+/).filter(Boolean);
   hit.fill(0); hitAttr.needsUpdate = true; hits = []; hitOrder = []; constellation.show(0);
@@ -559,6 +609,13 @@ async function search(query) {
       done++;
       searchCount.textContent = `${hits.length.toLocaleString()} found` + (done < count ? ` · ${Math.round(100 * done / count)}%` : "");
       if (done % 8 === 0 || done === count) drawConstellation();
+      if (done === count && similarOn && hits.length) {
+        searchCount.textContent = `${hits.length.toLocaleString()} found · finding similar…`;
+        const exact = hits.length, found = await nearest(await seedOf(hits), new Set(hits));
+        if (run !== searchRun) return;
+        lightSimilar(found);
+        searchCount.textContent = `${exact.toLocaleString()} found + ${SIMILAR} similar`;
+      }
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
@@ -570,12 +627,18 @@ document.getElementById("lens").addEventListener("click", () => {
   if (seek.classList.contains("open") && !searchBox.value) seek.classList.remove("open"); else openSearch();
 });
 searchBox.addEventListener("blur", () => { if (!searchBox.value) seek.classList.remove("open"); });
+similarButton.addEventListener("click", () => {
+  similarOn = !similarOn;
+  similarButton.classList.toggle("on", similarOn);
+  if (searchBox.value && !searchBox.value.startsWith("≈")) search(searchBox.value);
+});
 let searchTimer = 0;
 searchBox.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => search(searchBox.value), 250); });
 searchBox.addEventListener("keydown", e => {
   if (e.key === "Escape") { searchBox.value = ""; search(""); searchBox.blur(); }
   else if (e.key === "Enter" && hits.length) { searchBox.blur(); focus(Math.min(...hits)); }
 });
+if (params.has("similar")) { similarOn = true; similarButton.classList.add("on"); }
 if (params.has("q")) { searchBox.value = params.get("q"); seek.classList.add("open"); search(searchBox.value); }
 
 const textOf = async j => {
@@ -1064,7 +1127,7 @@ renderer.setAnimationLoop(now => {
   if (selected >= 0) when.textContent = new Date(t0 + daysOf(selected) * 86400000).toISOString().slice(0, 16).replace("T", " ") +
     (zoomed ? "  · zoomed into its moment · F view · Z back out" : "  · Z zoom into its moment") +
     (hitOrder.length ? " · ← → matches · shift ← → its day" : " · ← → its day") +
-    " · ↑ what it read · ↓ who read it · Tab labels · Backspace back · [ ] dim · I details · Esc sky";
+    " · ↑ what it read · ↓ who read it · M more like this · Tab labels · Backspace back · [ ] dim · I details · Esc sky";
   else {
     const l = overviewLens(), z = Math.min(0, cam.z - 20);
     const d = Math.max(0, Math.min(meta.days, l.anchor - l.tau * Math.expm1(-z / l.scale)));
