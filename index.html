@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Village Sky</title>
+<style>
+  :root { --ink: #e8e4dc; --dim: #8a8478; --panel: rgba(12, 12, 16, 0.86); }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--ink); overflow: hidden;
+    font: 14px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  canvas { display: block; }
+  #hud { position: fixed; left: 24px; top: 20px; pointer-events: none; letter-spacing: 0.04em; }
+  #hud .title { font-size: 18px; color: var(--ink); }
+  #hud .sub, #when, #keys { color: var(--dim); }
+  #when { position: fixed; left: 24px; bottom: 44px; font-size: 16px; pointer-events: none; }
+  #keys { position: fixed; left: 24px; bottom: 18px; font-size: 12px; pointer-events: none; }
+  #panel { position: fixed; right: 24px; top: 24px; bottom: 24px; width: min(520px, 40vw); background: var(--panel);
+    border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 14px; padding: 22px 24px; overflow-y: auto; display: none; }
+  #panel .who { font-size: 16px; }
+  #panel .meta { color: var(--dim); margin: 2px 0 14px; }
+  #panel .text { white-space: pre-wrap; word-break: break-word; }
+  #panel .cone { margin-top: 16px; padding: 10px 12px; border-left: 2px solid; color: var(--dim); font-size: 13px; }
+  #panel .cone .head { margin-bottom: 4px; }
+  #panel .echoes { margin-top: 18px; font-size: 13px; }
+  #panel .echoes .head { color: var(--dim); margin-bottom: 6px; }
+  #panel .echo { padding: 7px 9px; border-radius: 8px; cursor: pointer; }
+  #panel .echo:hover { background: rgba(255, 255, 255, 0.06); }
+  #panel .echo .snip { color: var(--ink); opacity: 0.75; margin-top: 2px; }
+  #panel .group { margin: 6px 0; }
+  #panel .group summary { cursor: pointer; padding: 4px 0; color: var(--dim); }
+  #panel .group summary .count { color: var(--ink); }
+  #panel .group .echo { margin-left: 10px; }
+  body.hide-ui #hud, body.hide-ui #when, body.hide-ui #keys { display: none; }
+</style>
+</head>
+<body>
+<div id="hud"><div class="title">AI VILLAGE SKY</div><div class="sub" id="counts">loading...</div></div>
+<div id="when"></div>
+<div id="keys">drag look · wheel fly through time · right-drag pan · click a star to fly in · Esc back to the sky · L lines · A autopilot · H hide text</div>
+<div id="panel"></div>
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
+<script type="module" src="sky.js"></script>
+</body>
+</html>
