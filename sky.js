@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { fetchData, createShardLoader, validateDataset } from "./data.js";
+import { MOTION_RATE, damp as ease, dampAngle, sameLens, browseLens } from "./motion.js";
 
 // World: x, y = the semantic map (similar messages sit together), z = time on a log scale around an anchor:
 //   z = -scale * sign(anchor - t) * log1p(|anchor - t| / tau)
@@ -6,26 +8,29 @@ import * as THREE from "three";
 // overview anchors at the newest message, so the last weeks spread out up close and the first months become
 // the far haze. Focusing a turn anchors at its moment with tau = 1 hour, so the minutes around it open into
 // distance: what it read recedes ahead of you, what came after is behind you. z blends between the two.
-const SPREAD = 60, DEPTH = 400, FOCUS_TAU = 1 / 24, FOCUS_SCALE = 180;
+const SPREAD = 60, DEPTH = 400;
 let tau = 10;                                   // overview tau, days: [ and ] change it
 
-const [meta, starBuf, colorBuf, edgeBuf, echoIndexBuf, echoSimBuf, contextBuf, contextKindBuf] = await Promise.all([
-  fetch("data/meta.json").then(r => r.json()),
-  fetch("data/stars.bin").then(r => r.arrayBuffer()),
-  fetch("data/colors.bin").then(r => r.arrayBuffer()),
-  fetch("data/edges.bin").then(r => r.arrayBuffer()),
-  fetch("data/echo_index.bin").then(r => r.ok ? r.arrayBuffer() : null),
-  fetch("data/echo_sim.bin").then(r => r.ok ? r.arrayBuffer() : null),
-  fetch("data/context.bin").then(r => r.ok ? r.arrayBuffer() : null),
-  fetch("data/context_kinds.bin").then(r => r.ok ? r.arrayBuffer() : null),
-]);
+let dataset;
+try {
+  dataset = await Promise.all([
+    fetchData("data/meta.json", "json"),
+    ...["stars", "colors", "edges"].map(name => fetchData(`data/${name}.bin`)),
+    ...["echo_index", "echo_sim", "context", "context_kinds"].map(name => fetchData(`data/${name}.bin`, "arrayBuffer", true)),
+  ]);
+  validateDataset(...dataset);
+} catch (error) {
+  document.getElementById("counts").textContent = "Could not load the sky. Check the data files and reload.";
+  throw error;
+}
+const [meta, starBuf, colorBuf, edgeBuf, echoIndexBuf, echoSimBuf, contextBuf, contextKindBuf] = dataset;
 const t0 = Date.parse(meta.first.replace(" ", "T") + "Z");
 const n = meta.count, stars = new Float32Array(starBuf), rgbs = new Uint8Array(colorBuf);
 const daysOf = i => stars[i * 4 + 2];
 document.getElementById("counts").textContent =
   `${n.toLocaleString()} turns · ${meta.speakers.length} speakers · ${meta.first.slice(0, 10)} to ${meta.last.slice(0, 10)}`;
 
-const overviewLens = () => ({ anchor: meta.days, tau, scale: DEPTH / Math.log1p(meta.days / tau), squash: [1, 1], centre: [0, 0] });
+const overviewLens = () => ({ anchor: meta.days, tau, scale: DEPTH / Math.log1p(Math.max(meta.days, 1 / 86400) / tau), squash: [1, 1], centre: [0, 0] });
 // Focus re-anchors time at the turn, with tau fitted to its conversation: the median gap to what it read and
 // who read it, so seconds-apart chatter spreads as evenly as hours-apart; the farthest lands 30 units out.
 // It also squashes meaning toward the turn: seen from the side, semantic x is depth, and a message on another
@@ -58,18 +63,24 @@ const fromX = new Float32Array(n), toX = new Float32Array(n), fromY = new Float3
 const fromZ = new Float32Array(n), toZ = new Float32Array(n);
 let lensBlend = 1;
 function setLens(next, instant) {
+  if (sameLens(lens, next) && !instant) return;
   lens = next;
   for (let i = 0; i < n; i++) {
     fromX[i] = position[i * 3]; toX[i] = xIn(lens, i);
     fromY[i] = position[i * 3 + 1]; toY[i] = yIn(lens, i);
     fromZ[i] = position[i * 3 + 2]; toZ[i] = depthIn(lens, daysOf(i));
+    if (instant) {
+      position[i * 3] = toX[i]; position[i * 3 + 1] = toY[i]; position[i * 3 + 2] = toZ[i];
+    }
   }
-  lensBlend = instant ? 0.9999 : 0;
+  lensBlend = instant ? 1 : 0;
+  if (instant) { positionAttr.needsUpdate = true; for (const r of ribbonSets) r.follow(); }
 }
 function stepLens(dt) {
   if (lensBlend >= 1) return false;
-  lensBlend = Math.min(1, lensBlend + dt / 1.2);
-  const e = lensBlend >= 1 ? 1 : lensBlend * lensBlend * (3 - 2 * lensBlend);
+  lensBlend = ease(lensBlend, 1, dt);
+  if (1 - lensBlend < 1e-5) lensBlend = 1;
+  const e = lensBlend;
   for (let i = 0; i < n; i++) {
     position[i * 3] = fromX[i] + (toX[i] - fromX[i]) * e;
     position[i * 3 + 1] = fromY[i] + (toY[i] - fromY[i]) * e;
@@ -260,7 +271,7 @@ function walk(origin, adj, sign) {
   return reached;
 }
 let focusTarget = 0, soloTarget = 0;
-function lightCone(i) {
+function lightCone(i, animate = true) {
   cone.fill(NONE);
   cone[i] = 0;
   const past = walk(i, earlier, -1), future = walk(i, later, 1);
@@ -274,29 +285,32 @@ function lightCone(i) {
   coneLineGeometry.setIndex(new THREE.BufferAttribute(new Uint32Array(pairs), 1));
   coneLines.visible = true;
   focusTarget = 1;
-  uniforms.uReveal.value = 0;
+  uniforms.uReveal.value = animate ? 0 : MAX_HOPS + 2;
   return { past, future };
 }
 
 // echoes: the selected star's nearest neighbours in meaning, joined to it by a thread coloured by contact
-const ECHO_K = 24, ECHO_MIN = 0.8;
+const ECHO_K = echoIndexBuf ? echoIndexBuf.byteLength / (4 * n) : 24, ECHO_MIN = 0.8;
 const echoIndex = echoIndexBuf && new Uint32Array(echoIndexBuf), echoSim = echoSimBuf && new Uint8Array(echoSimBuf);
 const CONTACT = { close: [1.0, 0.8, 0.35], near: [0.85, 0.85, 0.9], far: [0.45, 0.6, 0.85], none: [0.8, 0.45, 1.0],
   self: [0.4, 0.4, 0.45] };
 const GROUPS = [["close", "in contact", "1 hand-off: one read the other, then or from memory"],
   ["near", "near", "2 to 3 hand-offs: through intermediaries"], ["far", "distant", "4 or more hand-offs"],
-  ["none", "no contact", "no path through context: found independently"],
-  ["self", "itself", "the same speaker, from its own memory"]];
+  ["none", "no known path", contextBuf ? "no path in the inferred context graph" : "no path in the drawn graph; full context unavailable"],
+  ["self", "same speaker", "same agent; memory is assumed"]];
 
 // ribbons: quads expanded in screen space, so width is in pixels. They remember their star pairs, so they
 // follow the stars while the lens blends.
-const ribbonUniforms = { uResolution: { value: new THREE.Vector2(innerWidth, innerHeight) } };
+const flowPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
+const ribbonUniforms = { uResolution: { value: new THREE.Vector2(innerWidth, innerHeight) },
+  uTime: uniforms.uTime, uFlow: { value: flowPreference.matches ? 0 : 1 } };
+flowPreference.addEventListener("change", e => { ribbonUniforms.uFlow.value = e.matches ? 0 : 1; });
 const ribbonMaterial = new THREE.ShaderMaterial({
   uniforms: ribbonUniforms, transparent: true, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending,
   vertexShader: /* glsl */`
-    attribute vec3 aStart, aEnd, aColor; attribute float aWidth;
+    attribute vec3 aStart, aEnd, aColor; attribute float aWidth, aFlow;
     uniform vec2 uResolution;
-    varying vec3 vColor; varying float vSide, vAlong;
+    varying vec3 vColor; varying float vSide, vAlong, vLength, vFlow;
     void main() {
       vec4 a = projectionMatrix * modelViewMatrix * vec4(aStart, 1.0);
       vec4 b = projectionMatrix * modelViewMatrix * vec4(aEnd, 1.0);
@@ -306,12 +320,23 @@ const ribbonMaterial = new THREE.ShaderMaterial({
       p.xy += vec2(-dir.y, dir.x) * position.y * (aWidth + 2.0) / uResolution * p.w;   // 2 px of soft edge
       gl_Position = p;
       vColor = aColor; vSide = position.y * (aWidth + 2.0) / max(aWidth, 1.0); vAlong = position.x;
+      vLength = length((b.xy / b.w - a.xy / a.w) * uResolution * 0.5);
+      vFlow = aFlow;
     }`,
   fragmentShader: /* glsl */`
-    varying vec3 vColor; varying float vSide, vAlong;
+    uniform float uTime, uFlow;
+    varying vec3 vColor; varying float vSide, vAlong, vLength, vFlow;
     void main() {
       float edge = clamp(1.0 - (abs(vSide) - 1.0) * 2.0, 0.0, 1.0);        // full across the width, soft outside
-      gl_FragColor = vec4(vColor, edge * mix(0.35, 1.0, vAlong));           // dimmer at the start
+      // A bright head and a long fading tail travel from aStart to aEnd. Pixel spacing keeps long
+      // beams from becoming one huge flash; even a short beam gets a small travelling streak.
+      float travel = vAlong * max(vLength, 60.0);
+      float phase = fract((travel - uTime * 30.0) / 180.0);
+      float streak = smoothstep(0.65, 0.95, phase) * (1.0 - smoothstep(0.95, 1.0, phase));
+      float flow = vFlow * uFlow;
+      float brightness = mix(1.0, 0.65 + 1.10 * streak, flow);
+      vec3 ink = mix(vColor, vec3(1.0), flow * streak * 0.10);
+      gl_FragColor = vec4(ink, edge * mix(0.35, 1.0, vAlong) * brightness);
     }`,
 });
 const ribbonSets = [];
@@ -320,16 +345,17 @@ function makeRibbons(capacity) {
   geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array([0, -1, 0, 1, -1, 0, 1, 1, 0, 0, 1, 0]), 3));
   geometry.setIndex([0, 1, 2, 0, 2, 3]);
   const r = { start: new Float32Array(capacity * 3), end: new Float32Array(capacity * 3),
-    color: new Float32Array(capacity * 3), width: new Float32Array(capacity), pairs: [] };
-  for (const [name, array, size] of [["aStart", r.start, 3], ["aEnd", r.end, 3], ["aColor", r.color, 3], ["aWidth", r.width, 1]])
+    color: new Float32Array(capacity * 3), width: new Float32Array(capacity), flow: new Float32Array(capacity), pairs: [] };
+  for (const [name, array, size] of [["aStart", r.start, 3], ["aEnd", r.end, 3], ["aColor", r.color, 3], ["aWidth", r.width, 1], ["aFlow", r.flow, 1]])
     geometry.setAttribute(name, new THREE.InstancedBufferAttribute(array, size));
   r.mesh = new THREE.Mesh(geometry, ribbonMaterial);
   r.mesh.frustumCulled = false;
   r.mesh.visible = false;
-  r.set = (k, a, b, color, width) => {        // from star a to star b
+  r.set = (k, a, b, color, width, flow = 0) => {        // from star a to star b; flow only for directed edges
     r.pairs[k] = [a, b];
     r.color.set(color, k * 3);
     r.width[k] = width;
+    r.flow[k] = flow;
   };
   r.show = count => {
     r.pairs.length = count;
@@ -361,7 +387,7 @@ function strengthOf(e) {
   return (0.35 + 0.65 * similar) * close;
 }
 function contactOf(i, j, hops) {
-  if (rgbs[i * 4 + 3] === rgbs[j * 4 + 3]) return "self";
+  if (rgbs[i * 4 + 3] === rgbs[j * 4 + 3] && rgbs[i * 4 + 3] !== human) return "self";
   if (hops === undefined) return "none";
   const h = Math.abs(hops);
   return h <= 1 ? "close" : h <= 3 ? "near" : "far";
@@ -374,7 +400,7 @@ function echoesOf(i) {
     if (sim < ECHO_MIN) break;
     list.push({ j, sim });
   }
-  const other = list.filter(e => rgbs[e.j * 4 + 3] !== rgbs[i * 4 + 3]).map(e => e.j);
+  const other = list.filter(e => rgbs[e.j * 4 + 3] !== rgbs[i * 4 + 3] || rgbs[i * 4 + 3] === human).map(e => e.j);
   const handoffMap = contactDistances(i, other, 0), hopMap = contactDistances(i, other, 1);
   for (const e of list) {
     e.handoffs = handoffMap.get(e.j); e.hops = hopMap.get(e.j);
@@ -422,7 +448,10 @@ function contextOf(i) {
 const cam = { x: 0, y: 0, z: 80, yaw: 0, pitch: 0 };
 const params = new URLSearchParams(location.search);
 let autopilot = !params.has("cam") && !params.has("open"), lastInput = params.has("cam") ? Infinity : -1e9, pilotTime = 0;
-if (params.has("cam")) [cam.x, cam.y, cam.z, cam.yaw, cam.pitch] = params.get("cam").split(",").map(Number);
+if (params.has("cam")) {
+  const pose = params.get("cam").split(",").map(Number);
+  if (pose.length === 5 && pose.every(Number.isFinite)) [cam.x, cam.y, cam.z, cam.yaw, cam.pitch] = pose;
+}
 if (params.has("lines")) lines.visible = true;
 if (params.has("clean")) document.body.classList.add("hide-ui");
 function forward(c = cam) {
@@ -462,6 +491,8 @@ canvas.addEventListener("pointermove", e => {
   }
 });
 canvas.addEventListener("pointerup", e => { if (drag && drag.moved < 4 && drag.button === 0) { touched(); pick(e.clientX, e.clientY); } drag = null; });
+canvas.addEventListener("pointercancel", () => { drag = null; });
+canvas.addEventListener("lostpointercapture", () => { drag = null; });
 canvas.addEventListener("wheel", e => {
   e.preventDefault(); touched();
   const f = forward(), step = -e.deltaY * (selected >= 0 ? 0.02 : 0.08 * Math.max(1, Math.abs(cam.z) / 60));
@@ -469,7 +500,7 @@ canvas.addEventListener("wheel", e => {
 }, { passive: false });
 
 addEventListener("keydown", e => {
-  if (e.target === searchBox) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest?.("input, textarea, button, summary, [contenteditable='true']")) return;
   const k = e.key.toLowerCase();
   if (k === "/") { e.preventDefault(); openSearch(); return; }
   if (k === "l") lines.visible = !lines.visible;
@@ -480,19 +511,20 @@ addEventListener("keydown", e => {
   else if (k === "backspace") { e.preventDefault(); if (trail.length) focus(trail.pop(), false); else leave(); }
   else if ((k === "arrowright" || k === "arrowleft") && !e.shiftKey && hitOrder.length) { e.preventDefault(); stepHits(k === "arrowright" ? 1 : -1); }
   else if (k.startsWith("arrow")) { e.preventDefault(); step({ arrowright: "next", arrowleft: "prev", arrowup: "read", arrowdown: "reader" }[k]); }
-  else if (k === "tab") { e.preventDefault(); cycle(e.shiftKey ? -1 : 1); }
+  else if (k === "tab" && selected >= 0 && labels.length && e.target === document.body) { e.preventDefault(); cycle(e.shiftKey ? -1 : 1); }
   else if ((k === "enter" || k === " ") && cursor >= 0) { e.preventDefault(); focus(labels[cursor].j); }
   else if (k === "f" && selected >= 0 && zoomed) turnAround();
   else if (k === "m" && selected >= 0) moreLike(selected);
   else if (k === "z") toggleZoom();
-  else if ((k === "[" || k === "]") && selected < 0) { tau *= k === "]" ? 1.5 : 1 / 1.5; setLens(overviewLens()); }
+  else if ((k === "[" || k === "]") && selected < 0) { tau = Math.min(3650, Math.max(1 / 86400, tau * (k === "]" ? 1.5 : 1 / 1.5))); setLens(overviewLens()); }
   else if (k === "[" || k === "]") uniforms.uDim.value = Math.min(1, Math.max(0.02, uniforms.uDim.value * (k === "]" ? 1.4 : 1 / 1.4)));
   else if (k === "=" || k === "-") uniforms.uSize.value *= k === "=" ? 1.2 : 1 / 1.2;
   else if (k === "." || k === ",") lineUniforms.uAlpha.value *= k === "." ? 1.5 : 1 / 1.5;
 });
 
 // picking: project every star, take the nearest to the pointer within 14 px, preferring the closest to the camera
-const panel = document.getElementById("panel"), shards = new Map();
+const panel = document.getElementById("panel");
+const { shardOf, textOf } = createShardLoader(meta.shard, n);
 const viewProjection = new THREE.Matrix4();
 function pick(sx, sy) {
   const hit = labelAt(sx, sy);
@@ -516,10 +548,6 @@ function pick(sx, sy) {
 // arrives: case-insensitive, every word must appear. Enter in the box opens the first match; Esc clears.
 const searchBox = document.getElementById("search"), searchCount = document.getElementById("found");
 let searchRun = 0, searchTarget = 0, hits = [];
-const shardOf = s => {
-  if (!shards.has(s)) shards.set(s, fetch(`data/text/${String(s).padStart(4, "0")}.json`).then(r => r.json()));
-  return shards.get(s);
-};
 const CONSTELLATION = 4000;                  // above this many matches a thread is noise, not a path
 const constellation = makeRibbons(CONSTELLATION);
 let hitOrder = [];
@@ -547,7 +575,10 @@ const SIMILAR = 600, DIMS = 96;
 let vectors = null, similarOn = false;
 const similarButton = document.getElementById("similar");
 async function loadVectors() {
-  vectors ??= fetch("data/vectors.bin").then(r => r.arrayBuffer()).then(b => new Int8Array(b));
+  vectors ??= fetchData("data/vectors.bin").then(b => {
+    if (b.byteLength !== n * DIMS) throw new Error("Similarity vectors do not match this dataset");
+    return new Int8Array(b);
+  }).catch(error => { vectors = null; throw error; });
   return vectors;
 }
 async function nearest(seed, exclude) {
@@ -557,7 +588,8 @@ async function nearest(seed, exclude) {
     for (let k = 0, o = i * DIMS; k < DIMS; k++) d += seed[k] * v[o + k];
     scores[i] = exclude.has(i) ? -1e9 : d;
   }
-  const order = Uint32Array.from({ length: n }, (_, i) => i).sort((a, b) => scores[b] - scores[a]).slice(0, SIMILAR);
+  const order = Uint32Array.from({ length: n }, (_, i) => i).filter(i => !exclude.has(i))
+    .sort((a, b) => scores[b] - scores[a]).slice(0, SIMILAR);
   return { order, scores };
 }
 async function seedOf(stars_) {
@@ -577,23 +609,41 @@ function lightSimilar({ order, scores }) {
 }
 // M: more like this open turn, across all time
 async function moreLike(i) {
-  const run = ++searchRun;
-  hit.fill(0); hits = [i]; hit[i] = 1;
+  const run = resetSearch();
+  hits = [i]; hit[i] = 1; hitAttr.needsUpdate = true;
+  drawConstellation();
   searchTarget = 1;
-  const t = await textOf(i);
-  searchBox.value = `≈ ${t.speaker} ${t.time.slice(0, 10)}`;
-  seek.classList.add("open");
-  searchCount.textContent = "finding similar…";
-  const found = await nearest(await seedOf([i]), new Set([i]));
+  try {
+    const t = await textOf(i);
+    if (run !== searchRun) return;
+    searchBox.value = `≈ ${t.speaker} ${t.time.slice(0, 10)}`;
+    seek.classList.add("open");
+    searchCount.textContent = "finding similar…";
+    const seed = await seedOf([i]);
+    if (run !== searchRun) return;
+    const found = await nearest(seed, new Set([i]));
+    if (run !== searchRun) return;
+    lightSimilar(found);
+    searchCount.textContent = `${found.order.length} most similar`;
+  } catch (error) { searchFailed(run, error); }
+}
+function resetSearch() {
+  clearTimeout(searchTimer);
+  ++searchRun;
+  hit.fill(0); hitAttr.needsUpdate = true; hits = []; hitOrder = []; constellation.show(0);
+  searchTarget = 0;
+  searchCount.textContent = "";
+  return searchRun;
+}
+function searchFailed(run, error) {
   if (run !== searchRun) return;
-  lightSimilar(found);
-  searchCount.textContent = `${SIMILAR} most similar`;
+  resetSearch();                     // stop other shard workers before they publish partial results
+  searchCount.textContent = "Search unavailable. Try again.";
+  console.error(error);
 }
 async function search(query) {
-  const run = ++searchRun, words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  hit.fill(0); hitAttr.needsUpdate = true; hits = []; hitOrder = []; constellation.show(0);
+  const run = resetSearch(), words = query.toLowerCase().split(/\s+/).filter(Boolean);
   searchTarget = words.length ? 1 : 0;
-  searchCount.textContent = "";
   if (!words.length) return;
   const count = Math.ceil(n / meta.shard);
   let next = 0, done = 0;
@@ -611,18 +661,21 @@ async function search(query) {
       if (done % 8 === 0 || done === count) drawConstellation();
       if (done === count && similarOn && hits.length) {
         searchCount.textContent = `${hits.length.toLocaleString()} found · finding similar…`;
-        const exact = hits.length, found = await nearest(await seedOf(hits), new Set(hits));
+        const exactHits = hits.slice(), seed = await seedOf(exactHits);
+        if (run !== searchRun) return;
+        const found = await nearest(seed, new Set(exactHits));
         if (run !== searchRun) return;
         lightSimilar(found);
-        searchCount.textContent = `${exact.toLocaleString()} found + ${SIMILAR} similar`;
+        searchCount.textContent = `${exactHits.length.toLocaleString()} found + ${found.order.length} similar`;
       }
     }
   };
-  await Promise.all([worker(), worker(), worker(), worker()]);
+  try { await Promise.all([worker(), worker(), worker(), worker()]); }
+  catch (error) { searchFailed(run, error); }
 }
 // the lens opens the box; an empty box closes again when it loses focus
 const seek = document.getElementById("seek");
-function openSearch() { seek.classList.add("open"); searchBox.focus(); searchBox.select(); }
+function openSearch() { touched(); seek.classList.add("open"); searchBox.focus(); searchBox.select(); }
 document.getElementById("lens").addEventListener("click", () => {
   if (seek.classList.contains("open") && !searchBox.value) seek.classList.remove("open"); else openSearch();
 });
@@ -630,22 +683,21 @@ searchBox.addEventListener("blur", () => { if (!searchBox.value) seek.classList.
 similarButton.addEventListener("click", () => {
   similarOn = !similarOn;
   similarButton.classList.toggle("on", similarOn);
+  similarButton.setAttribute("aria-pressed", String(similarOn));
   if (searchBox.value && !searchBox.value.startsWith("≈")) search(searchBox.value);
 });
 let searchTimer = 0;
-searchBox.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => search(searchBox.value), 250); });
+searchBox.addEventListener("input", () => {
+  touched(); resetSearch();           // invalidate immediately, including the debounce interval
+  searchTimer = setTimeout(() => search(searchBox.value), 250);
+});
 searchBox.addEventListener("keydown", e => {
   if (e.key === "Escape") { searchBox.value = ""; search(""); searchBox.blur(); }
-  else if (e.key === "Enter" && hits.length) { searchBox.blur(); focus(Math.min(...hits)); }
+  else if (e.key === "Enter" && hits.length) { searchBox.blur(); focus(hits.reduce((a, b) => Math.min(a, b), Infinity)); }
 });
-if (params.has("similar")) { similarOn = true; similarButton.classList.add("on"); }
+if (params.has("similar")) { similarOn = true; similarButton.classList.add("on"); similarButton.setAttribute("aria-pressed", "true"); }
 if (params.has("q")) { searchBox.value = params.get("q"); seek.classList.add("open"); search(searchBox.value); }
 
-const textOf = async j => {
-  const s = Math.floor(j / meta.shard);
-  if (!shards.has(s)) shards.set(s, fetch(`data/text/${String(s).padStart(4, "0")}.json`).then(r => r.json()));
-  return (await shards.get(s))[j % meta.shard];
-};
 const rgbOf = c => `rgb(${c.map(v => Math.round(v * 255)).join(",")})`;
 const speakerColor = j => meta.speakers[rgbs[j * 4 + 3]].color;
 function ago(i, j) {
@@ -659,12 +711,14 @@ function ago(i, j) {
 // star opens into its card, and only its connections stay lit, each labelled where its star is.
 let selected = -1, overviewPose = null;
 const trail = [];
-let labels = [], cursor = -1, facing = 1;          // facing 1 looks into the past, -1 into the future
+let labels = [], retiringLabels = [], cursor = -1, facing = 1;          // facing 1 looks into the past, -1 into the future
 
-// starPos: where the overview lens puts a star (the lens may be mid-blend, so not position[])
-const starPos = i => new THREE.Vector3(stars[i * 4] * SPREAD, stars[i * 4 + 1] * SPREAD, depthIn(overviewLens(), daysOf(i)));
+// Destination positions allow rapid steps to retain the camera's framing while a lens is still moving.
+const pointInLens = i => new THREE.Vector3(xIn(lens, i), yIn(lens, i), depthIn(lens, daysOf(i)));
 function focus(i, remember = true, glide = false) {
+  if (!Number.isInteger(i) || i < 0 || i >= n) return;
   const from = selected;
+  const previousPoint = from >= 0 ? pointInLens(from) : null, base = { ...(camGoal || cam) };
   if (selected < 0) overviewPose = { ...cam };
   else if (remember && selected !== i) trail.push(selected);
   autopilot = false; lastInput = performance.now();
@@ -674,14 +728,12 @@ function focus(i, remember = true, glide = false) {
   focusCtx = ctx;
   glide = glide && from >= 0;
   if (zoomed) zoomInto(i, ctx, glide); else { setLens(overviewLens(), params.has("reveal")); }
-  const { past, future } = lightCone(i);
+  const { past, future } = lightCone(i, !glide);
   const echoes = echoesOf(i);
-  if (!zoomed) {
-    if (glide) {                              // keep the camera's offset from the turn: the sky slides past
-      const d = starPos(i).sub(starPos(from)), base = camGoal || cam;
-      camGoal = { x: base.x + d.x, y: base.y + d.y, z: base.z + d.z, yaw: base.yaw, pitch: base.pitch };
-    } else camGoal = approach(i);
-  }
+  if (glide) {                              // retain the destination's offset, even during rapid stepping
+    const d = pointInLens(i).sub(previousPoint);
+    camGoal = { ...base, x: base.x + d.x, y: base.y + d.y, z: base.z + d.z };
+  } else if (!zoomed) camGoal = approach(i);
   if (params.has("reveal")) Object.assign(cam, camGoal);
   soloTarget = 1;
   if (params.has("reveal")) { uniforms.uFocus.value = uniforms.uSolo.value = 1; uniforms.uReveal.value = MAX_HOPS + 2; }
@@ -701,15 +753,18 @@ function focus(i, remember = true, glide = false) {
   markAttr.needsUpdate = true;
   const warm = [1.0, 0.75, 0.45], cool = [0.5, 0.75, 1.0], dim = [0.45, 0.45, 0.5];
   const threads = items.filter(t => t.kind !== "echo");
-  threads.forEach((t, k) => contextRibbons.set(k, t.kind === "reader" ? i : t.j, t.kind === "reader" ? t.j : i,
-    (t.kind === "reader" ? cool : t.kind === "memory" ? dim : warm).map(v => v * 0.7), 2));
+  threads.forEach((t, k) => {
+    const outgoing = t.kind === "reader" || (t.kind === "memory" && t.j > i);
+    contextRibbons.set(k, outgoing ? i : t.j, outgoing ? t.j : i,
+      (t.kind === "memory" ? dim : outgoing ? cool : warm).map(v => v * 0.7), 2, t.kind === "memory" ? 0.55 : 1);
+  });
   contextRibbons.show(threads.length);
   let a = i, b = i, k = 0;
-  for (let step = 0; step < WARP_SHOWN; step++) if (warpPrev[a] >= 0) { warpRibbons.set(k++, warpPrev[a], a, worldline(i), 1.5); a = warpPrev[a]; }
-  for (let step = 0; step < WARP_SHOWN; step++) if (warpNext[b] >= 0) { warpRibbons.set(k++, b, warpNext[b], worldline(i), 1.5); b = warpNext[b]; }
+  for (let step = 0; step < WARP_SHOWN; step++) if (warpPrev[a] >= 0) { warpRibbons.set(k++, warpPrev[a], a, worldline(i), 1.5, 0.55); a = warpPrev[a]; }
+  for (let step = 0; step < WARP_SHOWN; step++) if (warpNext[b] >= 0) { warpRibbons.set(k++, b, warpNext[b], worldline(i), 1.5, 0.55); b = warpNext[b]; }
   warpRibbons.show(k);
-  buildLabels(i, items);
-  openCard(i);
+  buildLabels(i, items, glide);
+  openCard(i, glide);
   fillPanel(i, past, future, echoes);
 }
 
@@ -728,12 +783,13 @@ function step(direction) {
 function leave() {
   if (selected < 0) return;
   selected = -1;
+  ++cardRun;
   zoomed = false;
   trail.length = 0;
   soloTarget = 0; focusTarget = 0;
   setLens(overviewLens());
   if (overviewPose) camGoal = overviewPose;
-  for (const r of ribbonSets) r.show(0);
+  for (const r of ribbonSets) if (r !== constellation) r.show(0);
   mark.fill(0); markAttr.needsUpdate = true;
   clearLabels();
   closeCard();
@@ -771,7 +827,8 @@ function approach(i) {
 // Z: zoom into its moment. Time re-anchors at the turn with tau fitted to its conversation, meaning squashes
 // toward it, and the camera looks from the side: what it read on the left, who read it on the right.
 function zoomInto(i, ctx, keepDistance = false) {
-  const focused = focusLens(i, [...ctx.inputs, ...ctx.readers]);
+  const focused = keepDistance ? browseLens(lens, daysOf(i), [stars[i * 4] * SPREAD, stars[i * 4 + 1] * SPREAD])
+    : focusLens(i, [...ctx.inputs, ...ctx.readers]);
   setLens(focused, params.has("reveal"));
   if (!keepDistance) focusDistance = frameFor(i, ctx, focused);
   camGoal = viewPose(i);
@@ -781,7 +838,7 @@ function toggleZoom() {
   zoomed = !zoomed;
   if (zoomed) zoomInto(selected, focusCtx);
   else { setLens(overviewLens()); camGoal = approach(selected); }
-  openCard(selected);                      // resized for the new distance
+  openCard(selected, true);               // resize the existing card without replaying its reveal
 }
 function turnAround() {
   view = view === "side" ? "past" : "side";
@@ -802,7 +859,7 @@ const cardMaterial = (map, o) => new THREE.ShaderMaterial({
     uOffset: { value: new THREE.Vector2() }, uAnchor: { value: new THREE.Vector2(...(o.anchor || [0, 0])) },
     uMargin: { value: o.margin }, uRadius: { value: o.radius },
     uLine: { value: o.line }, uGlow: { value: o.glow }, uFill: { value: o.fill }, uColor: { value: new THREE.Color(...o.color) },
-    uOpen: { value: o.open ?? 0 }, uAlpha: { value: 0 }, uPixel: { value: o.pixel ? 1 : 0 } },
+    uOpen: { value: o.open ?? 0 }, uAlpha: { value: 0 }, uTextAlpha: { value: 1 }, uPixel: { value: o.pixel ? 1 : 0 } },
   vertexShader: /* glsl */`
     uniform vec3 uCenter; uniform vec2 uSize, uOffset, uResolution; uniform float uPixel;
     varying vec2 vP; varying float vDepth;
@@ -822,7 +879,7 @@ const cardMaterial = (map, o) => new THREE.ShaderMaterial({
     }`,
   fragmentShader: /* glsl */`
     uniform sampler2D uMap; uniform vec2 uSize, uAnchor; uniform vec3 uColor;
-    uniform float uMargin, uRadius, uLine, uGlow, uFill, uOpen, uAlpha, uFog, uPixel;
+    uniform float uMargin, uRadius, uLine, uGlow, uFill, uOpen, uAlpha, uTextAlpha, uFog, uPixel;
     varying vec2 vP; varying float vDepth;
     float box(vec2 p, vec2 b, float r) { vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }
     void main() {
@@ -840,7 +897,7 @@ const cardMaterial = (map, o) => new THREE.ShaderMaterial({
       vec3 rgb = vec3(0.03, 0.03, 0.045) * a + uColor * edge;
       vec2 uv = (vP + half_) / (2.0 * half_);
       vec4 t = texture2D(uMap, uv);
-      float text = smoothstep(0.75, 1.0, uOpen) * inside * t.a;
+      float text = smoothstep(0.75, 1.0, uOpen) * inside * t.a * uTextAlpha;
       rgb += t.rgb * text;
       a = max(a, text);
       gl_FragColor = vec4(rgb, a) * uAlpha * fog;
@@ -889,32 +946,54 @@ function textCanvas({ head, headColor, meta, body, width, maxLines, pad = 28 }) 
 }
 
 // the focus card
-const CARD_PX = 460;
-let card = null;
+let card = null, cardRun = 0;
 function closeCard() { if (card) { card.closing = true; } }
-function dropCard(c) { scene.remove(c.mesh); c.mesh.material.dispose(); c.texture.dispose(); }
-async function openCard(i) {
-  const t = await textOf(i);
-  if (selected !== i) return;
-  if (card) dropCard(card);
+function dropCard(c) { scene.remove(c.mesh); c.mesh.material.dispose(); c.texture?.dispose(); }
+async function openCard(i, preserve = false) {
+  const run = ++cardRun;
+  const retained = preserve && card && !card.closing ? card : null;
+  if (retained) {
+    retained.j = i;
+    retained.mesh.material.uniforms.uTextAlpha.value = 0; // don't show the previous turn while loading
+    retained.mesh.material.uniforms.uColor.value.setRGB(...speakerColor(i));
+  }
+  let t;
+  try { t = await textOf(i); }
+  catch (error) { if (run === cardRun && selected === i) textFailed(i, error); return; }
+  if (run !== cardRun || selected !== i) return;
   const color = speakerColor(i);
   const { texture, w, h } = textCanvas({ head: t.speaker, headColor: rgbOf(color), meta: `${t.time} UTC · #${t.room}`,
     body: t.text, width: 920, maxLines: 22 });
   const unit = focusDistance / (renderer.domElement.clientHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)));
-  const width = CARD_PX * unit, height = width * h / w, margin = 18 * unit, gap = 10 * unit;
+  const cardPixels = Math.min(460, innerWidth * 0.8, innerHeight * 0.65 * w / h);
+  const width = cardPixels * unit, height = width * h / w, margin = 18 * unit, gap = 10 * unit;
+  if (retained && card === retained) {
+    retained.texture.dispose();
+    Object.assign(retained, { texture, targetWidth: width, targetHeight: height, targetUnit: unit });
+    const u = retained.mesh.material.uniforms;
+    u.uMap.value = texture;
+    u.uTextAlpha.value = 1;
+    return;
+  }
+  if (card) dropCard(card);
   const mesh = new THREE.Mesh(quad, cardMaterial(texture, { margin, radius: 9 * unit, line: 1.2 * unit, glow: 8 * unit,
     fill: 0.9, color, anchor: [0, 1] }));
   mesh.frustumCulled = false;
   mesh.renderOrder = 10;
   const u = mesh.material.uniforms;
+  u.uCenter.value.fromArray(position, i * 3);
   u.uSize.value.set(width + 2 * margin, height + 2 * margin);
   u.uOffset.value.set(0, -height / 2 - gap);               // box top edge just below the star
   scene.add(mesh);
-  card = { mesh, texture, j: i, width, height, open: params.has("reveal") ? 1 : 0, closing: false };
+  card = { mesh, texture, j: i, width, height, unit, targetWidth: width, targetHeight: height, targetUnit: unit,
+    open: params.has("reveal") || preserve ? 1 : 0, closing: false };
 }
 
 // labels on the connections, at their own stars: a header by default; the cursor's label shows its text
-function clearLabels() { for (const l of labels) dropCard(l); labels = []; cursor = -1; }
+function clearLabels() {
+  for (const l of [...labels, ...retiringLabels]) dropCard(l);
+  labels = []; retiringLabels = []; cursor = -1;
+}
 function labelTexture(l, full) {
   const { texture, w, h } = textCanvas({ head: l.head, headColor: rgbOf(speakerColor(l.j).map(v => 0.45 + 0.55 * v)),
     body: full ? l.text : "", width: full ? 680 : 0, maxLines: 9, pad: 16 });
@@ -925,26 +1004,48 @@ function labelTexture(l, full) {
   u.uSize.value.set(w + 2 * 8, h + 2 * 8);
   u.uOffset.value.set(w / 2 + 18, 0);                      // left edge 18 px right of the star
 }
-function buildLabels(i, items) {
-  clearLabels();
+function buildLabels(i, items, preserve = false) {
+  const currentStar = preserve ? labels[cursor]?.j : undefined;
+  const previous = preserve ? new Map([...retiringLabels, ...labels].map(l => [l.j, l])) : new Map();
+  if (!preserve) clearLabels();
+  labels = []; retiringLabels = [];
   items.sort((a, b) => daysOf(a.j) - daysOf(b.j));
   for (const t of items) {
     const color = t.contact ? CONTACT[t.contact] : speakerColor(t.j);
-    const mesh = new THREE.Mesh(quad, cardMaterial(null, { margin: 8, radius: 7, line: 1.1, glow: 5, fill: 0.78,
-      color: color.map(v => v * 0.8), open: 1, pixel: true }));
-    mesh.frustumCulled = false;
-    mesh.renderOrder = 11;
-    mesh.visible = false;
-    scene.add(mesh);
-    const l = { ...t, mesh, head: "", text: "", alpha: 0 };
+    let l = previous.get(t.j);
+    previous.delete(t.j);
+    if (!l) {
+      const mesh = new THREE.Mesh(quad, cardMaterial(null, { margin: 8, radius: 7, line: 1.1, glow: 5, fill: 0.78,
+        color: color.map(v => v * 0.8), open: 1, pixel: true }));
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 11;
+      mesh.visible = false;
+      scene.add(mesh);
+      l = { mesh, head: "", text: "", alpha: 0 };
+    }
+    Object.assign(l, t, { contact: t.contact, rect: null });
     labels.push(l);
-    textOf(t.j).then(x => {
-      if (!labels.includes(l)) return;
+    const run = l.run = (l.run || 0) + 1;
+    const update = x => {
+      if (!labels.includes(l) || l.run !== run) return;
+      l.speaker = x.speaker;
       l.head = `${x.speaker} · ${ago(i, t.j)} · ${t.tag}`;
       l.text = x.text;
+      labelTexture(l, l.full ?? false);
+    };
+    if (l.speaker) { update({ speaker: l.speaker, text: l.text }); continue; }
+    textOf(t.j).then(x => {
+      update(x);
+    }).catch(error => {
+      if (!labels.includes(l) || l.run !== run) return;
+      l.head = "Text unavailable"; l.text = "Reopen this turn to retry.";
       labelTexture(l, false);
+      console.error(error);
     });
   }
+  retiringLabels = [...previous.values()];
+  for (const l of retiringLabels) l.rect = null;
+  cursor = currentStar === undefined ? -1 : labels.findIndex(l => l.j === currentStar);
 }
 function cycle(step) {
   if (labels.length) cursor = (cursor + step + labels.length) % labels.length;
@@ -959,11 +1060,11 @@ function hover(x, y) {
 }
 
 const projected = new THREE.Vector3();
-function screenOf(j) {
-  projected.fromArray(position, j * 3);
+function screenOf(j, point) {
+  if (point) projected.copy(point); else projected.fromArray(position, j * 3);
   const distance = projected.distanceTo(camera.position);
   projected.project(camera);
-  if (projected.z > 1 || Math.abs(projected.x) > 1.3 || Math.abs(projected.y) > 1.3) return null;
+  if (projected.z < -1 || projected.z > 1 || Math.abs(projected.x) > 1.3 || Math.abs(projected.y) > 1.3) return null;
   return { x: (projected.x + 1) / 2 * innerWidth, y: (1 - projected.y) / 2 * innerHeight, distance };
 }
 // each frame: the card opens (or closes), follows its star; labels go nearest first, and one that would overlap
@@ -974,12 +1075,21 @@ function placeOverlays(dt) {
   if (card) {
     card.open = Math.max(0, Math.min(1, card.open + (card.closing ? -dt * 3 : dt * 1.4)));
     const u = card.mesh.material.uniforms;
-    u.uCenter.value.fromArray(position, card.j * 3);
+    const target = pointInLens(card.j), blend = params.has("reveal") ? 1 : 1 - Math.exp(-dt * MOTION_RATE);
+    u.uCenter.value.lerp(target, blend);
+    card.width = ease(card.width, card.targetWidth, dt);
+    card.height = ease(card.height, card.targetHeight, dt);
+    card.unit = ease(card.unit, card.targetUnit, dt);
+    const margin = 18 * card.unit;
+    u.uSize.value.set(card.width + 2 * margin, card.height + 2 * margin);
+    u.uOffset.value.set(0, -card.height / 2 - 10 * card.unit);
+    u.uMargin.value = margin; u.uRadius.value = 9 * card.unit;
+    u.uLine.value = 1.2 * card.unit; u.uGlow.value = 8 * card.unit;
     u.uOpen.value = card.open;
     u.uAlpha.value = card.closing ? card.open : 1;
     if (card.closing && card.open <= 0) { dropCard(card); card = null; }
     else {
-      const s = screenOf(card.j);
+      const s = screenOf(card.j, u.uCenter.value);
       if (s && card.open > 0.5) {
         const k = pxPerUnit / s.distance;
         placed.push([s.x - card.width * k / 2, s.y, s.x + card.width * k / 2, s.y + card.height * k + 16]);
@@ -1002,13 +1112,28 @@ function placeOverlays(dt) {
     u.uColor.value.setRGB(...(current ? [1, 1, 1] : (l.contact ? CONTACT[l.contact] : speakerColor(l.j)).map(v => v * 0.8)));
   }
   for (const l of labels) {
+    l.mesh.material.uniforms.uCenter.value.fromArray(position, l.j * 3);
     l.alpha = params.has("reveal") ? +l.show : Math.max(0, Math.min(1, l.alpha + (l.show ? dt * 4 : -dt * 6)));
     l.mesh.visible = l.alpha > 0;
     l.mesh.material.uniforms.uAlpha.value = l.alpha * (selected >= 0 ? Math.min(1, Math.max(0.8, 40 / (screenOf(l.j)?.distance || 40))) : 1);
   }
+  retiringLabels = retiringLabels.filter(l => {
+    l.alpha = Math.max(0, l.alpha - dt * 6);
+    if (l.alpha === 0) { dropCard(l); return false; }
+    l.mesh.material.uniforms.uCenter.value.fromArray(position, l.j * 3);
+    l.mesh.material.uniforms.uAlpha.value = l.alpha;
+    return true;
+  });
 }
 
+function textFailed(i, error) {
+  if (selected !== i) return;
+  panel.textContent = "Could not load this turn. Reopen it to retry.";
+  panel.style.display = "block";
+  console.error(error);
+}
 function fillPanel(i, past, future, echoes) {
+  panel.textContent = "Loading turn…";
   textOf(i).then(t => {
     if (selected !== i) return;
     panel.innerHTML = "";
@@ -1022,7 +1147,7 @@ function fillPanel(i, past, future, echoes) {
       coneSummary("future cone", "it could have reached", future, "out to", "#8cccff"),
       echoList(i, echoes));
     panel.scrollTop = 0;
-  });
+  }).catch(error => textFailed(i, error));
 }
 
 // the echoes, grouped by hand-offs, in time order
@@ -1057,7 +1182,7 @@ function echoList(i, echoes) {
       textOf(j).then(t => {
         line.textContent = `${sim.toFixed(2)} · ${t.speaker} · ${t.time.slice(0, 16)} · ${when}${distance}`;
         snip.textContent = t.text.length > 180 ? t.text.slice(0, 180) + "…" : t.text;
-      });
+      }).catch(() => { line.textContent = "Text unavailable · click to retry"; });
     }
     box.append(group);
   }
@@ -1091,11 +1216,11 @@ addEventListener("resize", () => {
   renderer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
+  if (selected >= 0) openCard(selected, true);
 });
 if (params.has("open")) { zoomed = params.has("zoom"); focus(Number(params.get("open"))); }
 
 const when = document.getElementById("when");
-const ease = (value, target, dt, rate) => value + (target - value) * (1 - Math.exp(-dt * rate));
 let previous = performance.now();
 renderer.setAnimationLoop(now => {
   const dt = Math.min(0.1, (now - previous) / 1000);
@@ -1107,9 +1232,9 @@ renderer.setAnimationLoop(now => {
     const p = pilotTime * 0.012, rate = Math.min(2, 0.05 + pilotTime * 0.05);
     const goal = { z: 80 - DEPTH * 0.55 * (1 - Math.cos(p)), x: 25 * Math.sin(p * 1.7), y: 15 * Math.sin(p * 1.1),
       yaw: 0.12 * Math.sin(p * 1.3), pitch: 0.08 * Math.sin(p * 0.9) };
-    for (const key in goal) cam[key] = ease(cam[key], goal[key], dt, rate);
+    for (const key in goal) cam[key] = (key === "yaw" ? dampAngle : ease)(cam[key], goal[key], dt, rate);
   } else if (camGoal) {
-    for (const key in camGoal) cam[key] = ease(cam[key], camGoal[key], dt, 2.5);
+    for (const key in camGoal) cam[key] = (key === "yaw" ? dampAngle : ease)(cam[key], camGoal[key], dt);
   }
   if (stepLens(dt)) for (const r of ribbonSets) r.follow();
   // the cone fades in and its wavefront walks out a few hops a second; solo fades everything but connections

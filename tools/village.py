@@ -6,11 +6,13 @@ non-empty chat messages, sorted by time. Row i of the embeddings, the semantic m
 same message.
 """
 import glob, gzip, json, os, sys
+from functools import lru_cache
 
 here = os.path.dirname(os.path.abspath(__file__))
 data = os.path.normpath(os.path.join(here, "..", "data"))
 
 
+@lru_cache(maxsize=1)
 def snapshot():
     """The newest cached snapshot that has the chat messages."""
     paths = glob.glob(os.path.expanduser("~/.cache/huggingface/hub/datasets--aidigestorg--ai-village/snapshots/*"))

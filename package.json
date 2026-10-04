@@ -1,0 +1,9 @@
+{
+  "name": "village-sky",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check sky.js && node --check data.js && node --check motion.js"
+  }
+}

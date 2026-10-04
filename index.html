@@ -15,6 +15,7 @@
   #lens { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; color: var(--dim); cursor: pointer;
     background: rgba(10, 10, 14, 0.6); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 50%; }
   #lens:hover, #seek.open #lens { color: var(--ink); border-color: rgba(255, 255, 255, 0.35); }
+  button:focus-visible, #search:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
   #search { width: 0; padding: 6px 0; opacity: 0; font: inherit; font-size: 13px; color: var(--ink);
     background: rgba(10, 10, 14, 0.7); border: 1px solid transparent; border-radius: 8px; outline: none;
     transition: width 0.25s ease, padding 0.25s ease, opacity 0.2s; }
@@ -25,8 +26,8 @@
   #similar.on { color: #000; background: var(--ink); border-color: var(--ink); }
   #found { margin-left: 10px; color: var(--dim); font-size: 12px; }
   #hud .sub, #when, #keys { color: var(--dim); }
-  #when { position: fixed; left: 24px; bottom: 44px; font-size: 16px; pointer-events: none; }
-  #keys { position: fixed; left: 24px; bottom: 18px; font-size: 12px; pointer-events: none; }
+  #when { position: fixed; left: 24px; right: 24px; bottom: 68px; font-size: 14px; pointer-events: none; }
+  #keys { position: fixed; left: 24px; right: 24px; bottom: 18px; font-size: 12px; pointer-events: none; }
   #panel { position: fixed; right: 24px; top: 24px; bottom: 24px; width: min(520px, 40vw); background: var(--panel);
     border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 14px; padding: 22px 24px; overflow-y: auto; display: none; }
   #panel .who { font-size: 16px; }
@@ -44,6 +45,15 @@
   #panel .group summary .count { color: var(--ink); }
   #panel .group .echo { margin-left: 10px; }
   body.hide-ui #hud, body.hide-ui #when, body.hide-ui #keys { display: none; }
+  @media (max-width: 640px) {
+    #hud { left: 12px; right: 12px; top: 12px; }
+    #seek { flex-wrap: wrap; }
+    #seek.open #search { width: min(220px, calc(100vw - 128px)); }
+    #found { flex-basis: 100%; margin-left: 0; }
+    #panel { box-sizing: border-box; left: 12px; right: 12px; top: 140px; bottom: 100px; width: auto; padding: 16px; }
+    #when { left: 12px; right: 12px; bottom: 18px; font-size: 12px; }
+    #keys { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -51,8 +61,9 @@
   <div id="seek"><button id="lens" title="Search (/)" aria-label="Search"><svg viewBox="0 0 24 24" width="18" height="18"
     fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/>
     <path d="M15.5 15.5 21 21"/></svg></button><input id="search" placeholder="search the sky" spellcheck="false"
-    autocomplete="off" tabindex="-1"><button id="similar" title="Also find messages similar in meaning">≈</button><span
-    id="found"></span></div></div>
+    autocomplete="off" tabindex="-1" aria-label="Search messages and speakers"><button id="similar" title="Also find messages similar in meaning"
+    aria-label="Also find messages similar in meaning" aria-pressed="false">≈</button><span
+    id="found" role="status"></span></div></div>
 <div id="when"></div>
 <div id="keys">drag look · wheel fly through time · right-drag pan · click a star to fly in · Esc back to the sky · L lines · A autopilot · H hide text</div>
 <div id="panel"></div>

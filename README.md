@@ -36,15 +36,24 @@ rest of the sky dims to a grey haze. What stays lit:
   show how strongly the idea could have been carried (see below).
 - **Its light cone:** everything it could have influenced, or been influenced by, glowing faintly behind.
 
+Bright streaks flow along the context threads: warm light into the turn, cool light toward its readers.
+Its own sequence has a gentler flow toward later turns. Echo and search threads stay still; their
+similarity does not imply transmission. The flow depicts direction in the inferred graph, not proven
+information transfer, and is disabled when the system requests reduced motion.
+
 Press **Z** to zoom into its moment: time re-centres on the turn, scaled to its conversation, and you see it
 from the side, with what it read on the left and who read it on the right.
+Arrow navigation keeps that time scale and camera framing while moving to the next turn. The card stays
+open and shared connection labels remain visible; clicking a turn fits its conversation again.
 
 ![Zoomed into a moment](docs/moment.jpg)
 
 | key | |
 |---|---|
 | click | open a turn (or a label) |
-| ← → / hover | step through its connections; the label shows the full text |
+| ← → | step through search matches, or the speaker's turns; Shift ← → always follows the speaker |
+| ↑ ↓ | open its latest input or first reader |
+| Tab / hover | step through connection labels and show a text preview |
 | Enter | go to that connection |
 | Backspace | go back along your path |
 | Z | zoom into its moment; F flips the zoomed view to look down the time axis |
@@ -53,6 +62,7 @@ from the side, with what it read on the left and who read it on the right.
 | Esc | back to the whole sky |
 | drag, wheel, right-drag | look, fly through time, pan |
 | A / H / L | autopilot (starts after 45 s idle) / hide the text / all edges |
+| / / M | search messages and speakers / find messages similar to the open turn |
 
 ## What a connection means, and what it doesn't
 
@@ -70,9 +80,11 @@ Two distances between any pair of turns, computed exactly by a breadth-first sea
 - **hops:** reads and memory each cost 1. Short hops = the idea was fresh in context.
 - **hand-offs:** only reads cost 1; an agent's own memory is free (a 0-1 BFS). This assumes perfect memory.
 
-Real agents sit between the two. So the tool claims **"could have"**, never "did". The only hard claim is a
-negative: an echo with **no path at all** cannot have been carried through the chat. That is the "found
-independently" group.
+Real agents sit between the two. So the tool claims **"could have"**, never "did". An echo with **no path
+in the inferred graph** has no known route through the modelled chat context. That does not prove
+independent discovery: the export omits other read channels, and context edges are inferred. The UI calls
+this group "no known path". If the full context files are absent, it reports reachability only in the
+smaller drawn graph.
 
 ## Findings so far
 
@@ -83,7 +95,7 @@ Preliminary, from this dataset.
    4 times as often, rising with similarity. (1,500 sampled turns; hops over the drawn edges.)
 2. **With perfect memory, the village is a small world.** 70% of random earlier messages are one hand-off
    away. Contact alone cannot establish transmission in a shared room; meaning and short fresh-context
-   distance together can suggest it, and independence is provable only as the absence of any path.
+   distance together can suggest it; absence of a graph path alone does not prove independence.
 3. **"I'll wait" spreads by imitation.** Of 1.5M read edges, 1,544 carry an echo at ≥ 0.92 similarity
    directly. The turns with the most are Grok 4 and Claude Sonnet 4.5 waiting messages (Oct–Nov 2025), each
    reading near-identical waiting messages from other agents seconds before posting its own.
@@ -116,6 +128,18 @@ through its gate.
 | `tools/embed.py`, `tools/layout.py` | embeddings and the semantic map |
 | `tools/export.py` | stars, drawn edges, the full context graph, text shards |
 | `tools/neighbors.py` | the echo index |
+
+Embedding parts now carry an input manifest. Resuming requires the same message IDs, text, order, and
+encoding settings. If inputs change, or old parts have no manifest, use a new `--out` directory to rebuild;
+existing parts are preserved. Only the parts expected for the current run are merged.
+
+Run the focused regression checks without downloading the dataset or model:
+
+```sh
+npm test
+npm run check
+python -m unittest discover -s tests -p 'test_*.py'
+```
 
 ## Next
 
