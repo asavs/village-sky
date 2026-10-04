@@ -402,6 +402,7 @@ const params = new URLSearchParams(location.search);
 let autopilot = !params.has("cam") && !params.has("open"), lastInput = params.has("cam") ? Infinity : -1e9, pilotTime = 0;
 if (params.has("cam")) [cam.x, cam.y, cam.z, cam.yaw, cam.pitch] = params.get("cam").split(",").map(Number);
 if (params.has("lines")) lines.visible = true;
+if (params.has("clean")) document.body.classList.add("hide-ui");
 function forward(c = cam) {
   return new THREE.Vector3(-Math.sin(c.yaw) * Math.cos(c.pitch), Math.sin(c.pitch), -Math.cos(c.yaw) * Math.cos(c.pitch));
 }
@@ -909,7 +910,7 @@ addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
 });
-if (params.has("open")) focus(Number(params.get("open")));
+if (params.has("open")) { zoomed = params.has("zoom"); focus(Number(params.get("open"))); }
 
 const when = document.getElementById("when");
 const ease = (value, target, dt, rate) => value + (target - value) * (1 - Math.exp(-dt * rate));

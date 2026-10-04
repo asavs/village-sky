@@ -1,7 +1,7 @@
 """Exports every AI Village chat message as a star.
 
-Reads the Hugging Face snapshot and the semantic map from turnviz (messages.umap2.f32.npy, one row per
-message in the same order as messages.jsonl). Writes into data/:
+Reads the dataset (village.py) and the semantic map (data/embeddings/messages.umap2.f32.npy, from embed.py
+and layout.py, one row per message in village.messages() order). Writes into data/:
 
   stars.bin   per star, float32 x, y, days (since the first message), reads (how many later messages had it in context)
   colors.bin  per star, uint8 r, g, b, speaker index
@@ -14,34 +14,16 @@ message in the same order as messages.jsonl). Writes into data/:
   meta.json   speakers, colours, rooms, time range, counts
   text/NNNN.json  message text in shards of 2,000 stars, fetched when a star is opened
 
-    python tools/export.py [turnviz-embeddings-dir] [reads-per-turn]
+    python tools/export.py [reads-per-turn]
 """
-import glob, gzip, json, os, struct, sys
+import json, os, sys
 import numpy as np
+from village import data as out, messages
 
-here = os.path.dirname(os.path.abspath(__file__))
-out = os.path.normpath(os.path.join(here, "..", "data"))
-emb = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "..", "..", "turnviz", "loom", "data", "embeddings")
-recent = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+emb = os.path.join(out, "embeddings")
+recent = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 SHARD = 2000
-
-snap = glob.glob(os.path.expanduser("~/.cache/huggingface/hub/datasets--aidigestorg--ai-village/snapshots/*"))[0]
-def rows(name):
-    with gzip.open(os.path.join(snap, name), "rt", encoding="utf-8") as f:
-        for line in f:
-            yield json.loads(line)
-
-# same selection and order as turnviz's embed.py, so row i here is row i of the semantic map
-agents = {r["id"]: r["name"] for r in rows("agents.jsonl.gz")}
-rooms = {r["id"]: r["name"] for r in rows("chat_rooms.jsonl.gz")}
-items = []
-for r in rows("chat_messages.jsonl.gz"):
-    text = (r.get("content") or "").strip()
-    if not text:
-        continue
-    speaker = agents.get(r["agent_speaker_id"], "human") if r["speaker_type"] == "agent" else "human"
-    items.append(({"id": r["id"], "time": r["created_at"][:19], "speaker": speaker, "room": rooms.get(r["room_id"], "?")}, text))
-items.sort(key=lambda it: it[0]["time"])
+items = messages()
 
 ids = [json.loads(l)["id"] for l in open(os.path.join(emb, "messages.jsonl"), encoding="utf-8")]
 assert ids == [m["id"] for m, _ in items], "message order differs from the semantic map"

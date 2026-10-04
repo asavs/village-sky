@@ -1,19 +1,19 @@
 """Nearest neighbours in meaning for every message: the echoes.
 
-Exact cosine kNN over turnviz's message embeddings (Qwen3, 256 dims), on the GPU in blocks. Writes:
+Exact cosine kNN over the message embeddings (data/embeddings, from embed.py) (Qwen3, 256 dims), on the GPU in blocks. Writes:
 
   data/echo_index.bin  uint32, K per star, nearest first (self and empty rows excluded)
   data/echo_sim.bin    uint8,  K per star, cosine similarity * 255
 
-    python tools/neighbors.py [turnviz-embeddings-dir] [K]
+    python tools/neighbors.py [K]
 """
 import os, sys, time
 import numpy as np, torch
 
-here = os.path.dirname(os.path.abspath(__file__))
-out = os.path.normpath(os.path.join(here, "..", "data"))
-emb = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "..", "..", "turnviz", "loom", "data", "embeddings")
-K = int(sys.argv[2]) if len(sys.argv) > 2 else 24
+from village import data as out
+
+emb = os.path.join(out, "embeddings")
+K = int(sys.argv[1]) if len(sys.argv) > 1 else 24
 
 t = time.time()
 device = "cuda" if torch.cuda.is_available() else "cpu"
