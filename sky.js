@@ -158,12 +158,12 @@ geometry.setAttribute("cone", coneAttr);
 geometry.setAttribute("mark", markAttr);
 
 const uniforms = { uTime: { value: 0 }, uPx: { value: 1 }, uSize: { value: 0.45 }, uFog: { value: 160 },
-  uFocus: { value: 0 }, uReveal: { value: 0 }, uSolo: { value: 0 } };
+  uFocus: { value: 0 }, uReveal: { value: 0 }, uSolo: { value: 0 }, uDim: { value: 0.14 } };
 const starMaterial = new THREE.ShaderMaterial({
   uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
   vertexShader: /* glsl */`
     attribute vec3 color; attribute float reads, cone, mark;
-    uniform float uTime, uPx, uSize, uFog, uFocus, uReveal, uSolo;
+    uniform float uTime, uPx, uSize, uFog, uFocus, uReveal, uSolo, uDim;
     varying vec3 vColor; varying float vBright;
     void main() {
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
@@ -180,11 +180,12 @@ const starMaterial = new THREE.ShaderMaterial({
       fog = mix(fog, sqrt(fog), max(lit * uFocus, marked * uSolo));
       float weight = lit * (0.12 + 1.6 * exp(-hops / 5.0)) + front * 1.5;       // near hops blaze, the far cone glows
       float cone_ = mix(1.0, mix(0.07, weight, lit), uFocus);
-      float solo = mix(0.3 + 0.9 * lit * exp(-hops / 5.0), 1.8, marked);       // solo: connections, its cone, the sky
+      float solo = mix(uDim * (1.0 + 2.2 * lit * exp(-hops / 5.0)), 1.8, marked);   // solo: connections, its cone, the sky
       vBright = mix(cone_, solo, uSolo) * twinkle * fog * min(1.0, (px * px) / 9.0);
       gl_PointSize = clamp(px, 3.0, 96.0);
       vec3 tint = cone < 0.0 ? vec3(1.0, 0.78, 0.45) : vec3(0.55, 0.8, 1.0);   // past warm, future cool
       vColor = mix(color, tint, 0.5 * lit * uFocus * step(0.5, hops) * (1.0 - uSolo));
+      vColor = mix(vColor, vec3(dot(vColor, vec3(0.3, 0.55, 0.15))), 0.5 * uSolo * (1.0 - marked));   // the rest, half grey
     }`,
   fragmentShader: /* glsl */`
     varying vec3 vColor; varying float vBright;
@@ -457,6 +458,7 @@ addEventListener("keydown", e => {
   else if (k === "f" && selected >= 0 && zoomed) turnAround();
   else if (k === "z") toggleZoom();
   else if ((k === "[" || k === "]") && selected < 0) { tau *= k === "]" ? 1.5 : 1 / 1.5; setLens(overviewLens()); }
+  else if (k === "[" || k === "]") uniforms.uDim.value = Math.min(1, Math.max(0.02, uniforms.uDim.value * (k === "]" ? 1.4 : 1 / 1.4)));
   else if (k === "=" || k === "-") uniforms.uSize.value *= k === "=" ? 1.2 : 1 / 1.2;
   else if (k === "." || k === ",") lineUniforms.uAlpha.value *= k === "." ? 1.5 : 1 / 1.5;
 });
@@ -940,7 +942,7 @@ renderer.setAnimationLoop(now => {
   uniforms.uPx.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
   if (selected >= 0) when.textContent = new Date(t0 + daysOf(selected) * 86400000).toISOString().slice(0, 16).replace("T", " ") +
     (zoomed ? "  · zoomed into its moment · F view · Z back out" : "  · Z zoom into its moment") +
-    " · ← → connections · Enter go · Backspace back · I details · Esc sky";
+    " · ← → connections · Enter go · Backspace back · [ ] dim · I details · Esc sky";
   else {
     const l = overviewLens(), z = Math.min(0, cam.z - 20);
     const d = Math.max(0, Math.min(meta.days, l.anchor - l.tau * Math.expm1(-z / l.scale)));
