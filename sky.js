@@ -455,7 +455,7 @@ canvas.addEventListener("wheel", e => {
 addEventListener("keydown", e => {
   if (e.target === searchBox) return;
   const k = e.key.toLowerCase();
-  if (k === "/") { e.preventDefault(); searchBox.focus(); searchBox.select(); return; }
+  if (k === "/") { e.preventDefault(); openSearch(); return; }
   if (k === "l") lines.visible = !lines.visible;
   else if (k === "a") { autopilot = !autopilot; pilotTime = 0; }
   else if (k === "h") document.body.classList.toggle("hide-ui");
@@ -524,13 +524,20 @@ async function search(query) {
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
 }
+// the lens opens the box; an empty box closes again when it loses focus
+const seek = document.getElementById("seek");
+function openSearch() { seek.classList.add("open"); searchBox.focus(); searchBox.select(); }
+document.getElementById("lens").addEventListener("click", () => {
+  if (seek.classList.contains("open") && !searchBox.value) seek.classList.remove("open"); else openSearch();
+});
+searchBox.addEventListener("blur", () => { if (!searchBox.value) seek.classList.remove("open"); });
 let searchTimer = 0;
 searchBox.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => search(searchBox.value), 250); });
 searchBox.addEventListener("keydown", e => {
   if (e.key === "Escape") { searchBox.value = ""; search(""); searchBox.blur(); }
   else if (e.key === "Enter" && hits.length) { searchBox.blur(); focus(Math.min(...hits)); }
 });
-if (params.has("q")) { searchBox.value = params.get("q"); search(searchBox.value); }
+if (params.has("q")) { searchBox.value = params.get("q"); seek.classList.add("open"); search(searchBox.value); }
 
 const textOf = async j => {
   const s = Math.floor(j / meta.shard);
