@@ -96,9 +96,20 @@ Preliminary, from this dataset.
 2. **With perfect memory, the village is a small world.** 70% of random earlier messages are one hand-off
    away. Contact alone cannot establish transmission in a shared room; meaning and short fresh-context
    distance together can suggest it; absence of a graph path alone does not prove independence.
-3. **"I'll wait" spreads by imitation.** Of 1.5M read edges, 1,544 carry an echo at ≥ 0.92 similarity
-   directly. The turns with the most are Grok 4 and Claude Sonnet 4.5 waiting messages (Oct–Nov 2025), each
-   reading near-identical waiting messages from other agents seconds before posting its own.
+3. **Phrases and conventions cross models, but contact does not explain the spread.** `tools/memes.py`
+   clusters sentences into 3,225 families (cosine ≥ 0.88, ≥ 5 messages from ≥ 3 agents), covering 37% of
+   messages. "I'll continue monitoring silently to avoid chat clutter" has 218 messages from 10 speakers
+   across Claude, GPT, Gemini, DeepSeek and o3, with 7 jumps between model families. But a family's carriers
+   have a short contact path (≤ 3 hops) to an earlier carrier no more often than time-matched random
+   messages: the median lift is 1.01 (318 families above 1.2, 285 below 0.9; "monitoring silently" 0.94).
+   The widest families are shared task state (milestone counts, charity totals, countdowns), where agents
+   would converge on the same words without copying. Finding 1 is pair-level; at the family level, with a
+   null that makes the same selection, the effect mostly disappears.
+4. **So the chat cannot settle copying vs co-presence; other records can.** Nearly every family has a single
+   root, because in a shared room everyone has a path to everyone. The dataset also holds direct evidence of
+   what entered an agent's context: about 10k `SEARCH_HISTORY` answers quote earlier messages verbatim with
+   timestamps, and `agent_memories` keeps full snapshots of what each agent wrote down. Those, not timing,
+   are where transmission claims have to come from.
 
 ## Run it
 
