@@ -389,6 +389,22 @@ function echoesOf(i) {
   return list.sort((a, b) => daysOf(a.j) - daysOf(b.j));
 }
 
+// The warp and the weft. The warp is one speaker's turns in order, any room: its day of work. The weft is
+// what crosses between speakers: what a turn read and who read it. ← → walk the warp, ↑ ↓ cross the weft.
+const human = meta.speakers.findIndex(sp => sp.name === "human");
+const warpPrev = new Int32Array(n).fill(-1), warpNext = new Int32Array(n).fill(-1);
+{
+  const last = new Int32Array(meta.speakers.length).fill(-1);
+  for (let i = 0; i < n; i++) {
+    const sp = rgbs[i * 4 + 3];
+    if (sp === human) continue;
+    if (last[sp] >= 0) { warpPrev[i] = last[sp]; warpNext[last[sp]] = i; }
+    last[sp] = i;
+  }
+}
+const WARP_SHOWN = 16;                       // turns of the worldline drawn each side of the focused one
+const warpRibbons = makeRibbons(2 * WARP_SHOWN);
+
 // what a turn read (latest direct inputs), its own previous message, and who read it (first readers)
 const INPUTS = 5, READERS = 5, ECHO_LABELS = 6;
 function contextOf(i) {
@@ -462,7 +478,8 @@ addEventListener("keydown", e => {
   else if (k === "i") panel.style.display = panel.style.display === "block" ? "none" : selected >= 0 ? "block" : "none";
   else if (k === "escape") leave();
   else if (k === "backspace") { e.preventDefault(); if (trail.length) focus(trail.pop(), false); else leave(); }
-  else if (k === "arrowright" || k === "arrowleft") { e.preventDefault(); cycle(k === "arrowright" ? 1 : -1); }
+  else if (k.startsWith("arrow")) { e.preventDefault(); step({ arrowright: "next", arrowleft: "prev", arrowup: "read", arrowdown: "reader" }[k]); }
+  else if (k === "tab") { e.preventDefault(); cycle(e.shiftKey ? -1 : 1); }
   else if ((k === "enter" || k === " ") && cursor >= 0) { e.preventDefault(); focus(labels[cursor].j); }
   else if (k === "f" && selected >= 0 && zoomed) turnAround();
   else if (k === "z") toggleZoom();
@@ -559,7 +576,10 @@ let selected = -1, overviewPose = null;
 const trail = [];
 let labels = [], cursor = -1, facing = 1;          // facing 1 looks into the past, -1 into the future
 
-function focus(i, remember = true) {
+// starPos: where the overview lens puts a star (the lens may be mid-blend, so not position[])
+const starPos = i => new THREE.Vector3(stars[i * 4] * SPREAD, stars[i * 4 + 1] * SPREAD, depthIn(overviewLens(), daysOf(i)));
+function focus(i, remember = true, glide = false) {
+  const from = selected;
   if (selected < 0) overviewPose = { ...cam };
   else if (remember && selected !== i) trail.push(selected);
   autopilot = false; lastInput = performance.now();
@@ -567,10 +587,16 @@ function focus(i, remember = true) {
   facing = 1;
   const ctx = contextOf(i);
   focusCtx = ctx;
-  if (zoomed) zoomInto(i, ctx); else { setLens(overviewLens(), params.has("reveal")); }
+  glide = glide && from >= 0;
+  if (zoomed) zoomInto(i, ctx, glide); else { setLens(overviewLens(), params.has("reveal")); }
   const { past, future } = lightCone(i);
   const echoes = echoesOf(i);
-  if (!zoomed) camGoal = approach(i);
+  if (!zoomed) {
+    if (glide) {                              // keep the camera's offset from the turn: the sky slides past
+      const d = starPos(i).sub(starPos(from)), base = camGoal || cam;
+      camGoal = { x: base.x + d.x, y: base.y + d.y, z: base.z + d.z, yaw: base.yaw, pitch: base.pitch };
+    } else camGoal = approach(i);
+  }
   if (params.has("reveal")) Object.assign(cam, camGoal);
   soloTarget = 1;
   if (params.has("reveal")) { uniforms.uFocus.value = uniforms.uSolo.value = 1; uniforms.uReveal.value = MAX_HOPS + 2; }
@@ -579,7 +605,8 @@ function focus(i, remember = true) {
   mark.fill(0);
   mark[i] = 1;
   const items = [];
-  if (ctx.memory >= 0) items.push({ j: ctx.memory, kind: "memory", tag: "its previous" });
+  if (warpPrev[i] >= 0) items.push({ j: warpPrev[i], kind: "memory", tag: "← its previous" });
+  if (warpNext[i] >= 0) items.push({ j: warpNext[i], kind: "memory", tag: "its next →" });
   for (const j of ctx.inputs) items.push({ j, kind: "input", tag: "it read" });
   for (const j of ctx.readers) items.push({ j, kind: "reader", tag: "read it" });
   const seen = new Set(items.map(t => t.j));
@@ -592,9 +619,25 @@ function focus(i, remember = true) {
   threads.forEach((t, k) => contextRibbons.set(k, t.kind === "reader" ? i : t.j, t.kind === "reader" ? t.j : i,
     (t.kind === "reader" ? cool : t.kind === "memory" ? dim : warm).map(v => v * 0.7), 2));
   contextRibbons.show(threads.length);
+  let a = i, b = i, k = 0;
+  for (let step = 0; step < WARP_SHOWN; step++) if (warpPrev[a] >= 0) { warpRibbons.set(k++, warpPrev[a], a, worldline(i), 1.5); a = warpPrev[a]; }
+  for (let step = 0; step < WARP_SHOWN; step++) if (warpNext[b] >= 0) { warpRibbons.set(k++, b, warpNext[b], worldline(i), 1.5); b = warpNext[b]; }
+  warpRibbons.show(k);
   buildLabels(i, items);
   openCard(i);
   fillPanel(i, past, future, echoes);
+}
+
+function worldline(i) { return speakerColor(i).map(v => v * 0.45); }
+// ← → walk the warp; ↑ goes to what it read most recently, ↓ to its first reader
+function step(direction) {
+  if (selected < 0) return;
+  let j = -1;
+  if (direction === "next") j = warpNext[selected];
+  else if (direction === "prev") j = warpPrev[selected];
+  else if (direction === "read") j = focusCtx.inputs[focusCtx.inputs.length - 1] ?? -1;
+  else if (direction === "reader") j = focusCtx.readers[0] ?? -1;
+  if (j >= 0) focus(j, true, true);
 }
 
 function leave() {
@@ -642,10 +685,10 @@ function approach(i) {
 }
 // Z: zoom into its moment. Time re-anchors at the turn with tau fitted to its conversation, meaning squashes
 // toward it, and the camera looks from the side: what it read on the left, who read it on the right.
-function zoomInto(i, ctx) {
+function zoomInto(i, ctx, keepDistance = false) {
   const focused = focusLens(i, [...ctx.inputs, ...ctx.readers]);
   setLens(focused, params.has("reveal"));
-  focusDistance = frameFor(i, ctx, focused);
+  if (!keepDistance) focusDistance = frameFor(i, ctx, focused);
   camGoal = viewPose(i);
 }
 function toggleZoom() {
@@ -998,7 +1041,7 @@ renderer.setAnimationLoop(now => {
   uniforms.uPx.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
   if (selected >= 0) when.textContent = new Date(t0 + daysOf(selected) * 86400000).toISOString().slice(0, 16).replace("T", " ") +
     (zoomed ? "  · zoomed into its moment · F view · Z back out" : "  · Z zoom into its moment") +
-    " · ← → connections · Enter go · Backspace back · [ ] dim · I details · Esc sky";
+    " · ← → its day · ↑ what it read · ↓ who read it · Tab labels · Backspace back · [ ] dim · I details · Esc sky";
   else {
     const l = overviewLens(), z = Math.min(0, cam.z - 20);
     const d = Math.max(0, Math.min(meta.days, l.anchor - l.tau * Math.expm1(-z / l.scale)));
