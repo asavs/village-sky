@@ -476,8 +476,9 @@ addEventListener("keydown", e => {
   else if (k === "a") { autopilot = !autopilot; pilotTime = 0; }
   else if (k === "h") document.body.classList.toggle("hide-ui");
   else if (k === "i") panel.style.display = panel.style.display === "block" ? "none" : selected >= 0 ? "block" : "none";
-  else if (k === "escape") leave();
+  else if (k === "escape") { if (selected >= 0) leave(); else if (searchBox.value) { searchBox.value = ""; search(""); seek.classList.remove("open"); } }
   else if (k === "backspace") { e.preventDefault(); if (trail.length) focus(trail.pop(), false); else leave(); }
+  else if ((k === "arrowright" || k === "arrowleft") && !e.shiftKey && hitOrder.length) { e.preventDefault(); stepHits(k === "arrowright" ? 1 : -1); }
   else if (k.startsWith("arrow")) { e.preventDefault(); step({ arrowright: "next", arrowleft: "prev", arrowup: "read", arrowdown: "reader" }[k]); }
   else if (k === "tab") { e.preventDefault(); cycle(e.shiftKey ? -1 : 1); }
   else if ((k === "enter" || k === " ") && cursor >= 0) { e.preventDefault(); focus(labels[cursor].j); }
@@ -518,9 +519,29 @@ const shardOf = s => {
   if (!shards.has(s)) shards.set(s, fetch(`data/text/${String(s).padStart(4, "0")}.json`).then(r => r.json()));
   return shards.get(s);
 };
+const CONSTELLATION = 4000;                  // above this many matches a thread is noise, not a path
+const constellation = makeRibbons(CONSTELLATION);
+let hitOrder = [];
+function drawConstellation() {
+  hitOrder = hits.slice().sort((a, b) => a - b);
+  if (hitOrder.length > CONSTELLATION) { constellation.show(0); return; }
+  for (let k = 1; k < hitOrder.length; k++)
+    constellation.set(k - 1, hitOrder[k - 1], hitOrder[k], speakerColor(hitOrder[k]).map(v => v * 0.5), 1.2);
+  constellation.show(Math.max(0, hitOrder.length - 1));
+}
+// ← → along the constellation: the next match after the open turn, or the first one
+function stepHits(direction) {
+  if (!hitOrder.length) return false;
+  let j;
+  if (selected < 0) j = direction > 0 ? hitOrder[0] : hitOrder[hitOrder.length - 1];
+  else if (direction > 0) j = hitOrder.find(h => h > selected);
+  else j = hitOrder.findLast(h => h < selected);
+  if (j !== undefined) focus(j, true, selected >= 0);
+  return true;
+}
 async function search(query) {
   const run = ++searchRun, words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  hit.fill(0); hitAttr.needsUpdate = true; hits = [];
+  hit.fill(0); hitAttr.needsUpdate = true; hits = []; hitOrder = []; constellation.show(0);
   searchTarget = words.length ? 1 : 0;
   searchCount.textContent = "";
   if (!words.length) return;
@@ -537,6 +558,7 @@ async function search(query) {
       hitAttr.needsUpdate = true;
       done++;
       searchCount.textContent = `${hits.length.toLocaleString()} found` + (done < count ? ` · ${Math.round(100 * done / count)}%` : "");
+      if (done % 8 === 0 || done === count) drawConstellation();
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
@@ -1041,7 +1063,8 @@ renderer.setAnimationLoop(now => {
   uniforms.uPx.value = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
   if (selected >= 0) when.textContent = new Date(t0 + daysOf(selected) * 86400000).toISOString().slice(0, 16).replace("T", " ") +
     (zoomed ? "  · zoomed into its moment · F view · Z back out" : "  · Z zoom into its moment") +
-    " · ← → its day · ↑ what it read · ↓ who read it · Tab labels · Backspace back · [ ] dim · I details · Esc sky";
+    (hitOrder.length ? " · ← → matches · shift ← → its day" : " · ← → its day") +
+    " · ↑ what it read · ↓ who read it · Tab labels · Backspace back · [ ] dim · I details · Esc sky";
   else {
     const l = overviewLens(), z = Math.min(0, cam.z - 20);
     const d = Math.max(0, Math.min(meta.days, l.anchor - l.tau * Math.expm1(-z / l.scale)));
