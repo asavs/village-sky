@@ -6,11 +6,15 @@ import * as THREE from "three";
 const SPREAD = 60, DEPTH = 400;
 let tau = 10;                                   // days; larger keeps the recent past closer to linear
 
-const [meta, starBuf, colorBuf, edgeBuf] = await Promise.all([
+const [meta, starBuf, colorBuf, edgeBuf, echoIndexBuf, echoSimBuf, contextBuf, contextKindBuf] = await Promise.all([
   fetch("data/meta.json").then(r => r.json()),
   fetch("data/stars.bin").then(r => r.arrayBuffer()),
   fetch("data/colors.bin").then(r => r.arrayBuffer()),
   fetch("data/edges.bin").then(r => r.arrayBuffer()),
+  fetch("data/echo_index.bin").then(r => r.ok ? r.arrayBuffer() : null),
+  fetch("data/echo_sim.bin").then(r => r.ok ? r.arrayBuffer() : null),
+  fetch("data/context.bin").then(r => r.ok ? r.arrayBuffer() : null),
+  fetch("data/context_kinds.bin").then(r => r.ok ? r.arrayBuffer() : null),
 ]);
 const t0 = Date.parse(meta.first.replace(" ", "T") + "Z");
 const n = meta.count, stars = new Float32Array(starBuf), rgbs = new Uint8Array(colorBuf);
@@ -49,15 +53,60 @@ geometry.setAttribute("reads", new THREE.BufferAttribute(reads, 1));
 
 // the graph both ways, as CSR: out = edges to later turns, in = edges from earlier turns
 const edges = new Uint32Array(edgeBuf), m = edges.length / 2;
-function adjacency(from, to) {
-  const start = new Uint32Array(n + 1), list = new Uint32Array(m);
-  for (let e = 0; e < m; e++) start[edges[e * 2 + from] + 1]++;
+function adjacency(pairs, from, to, kinds) {
+  const count = pairs.length / 2, start = new Uint32Array(n + 1), list = new Uint32Array(count);
+  const kind = kinds ? new Uint8Array(count) : null;
+  for (let e = 0; e < count; e++) start[pairs[e * 2 + from] + 1]++;
   for (let i = 0; i < n; i++) start[i + 1] += start[i];
   const fill = start.slice(0, n);
-  for (let e = 0; e < m; e++) list[fill[edges[e * 2 + from]]++] = edges[e * 2 + to];
-  return { start, list };
+  for (let e = 0; e < count; e++) {
+    const k = fill[pairs[e * 2 + from]]++;
+    list[k] = pairs[e * 2 + to];
+    if (kind) kind[k] = kinds[e];
+  }
+  return { start, list, kind };
 }
-const later = adjacency(0, 1), earlier = adjacency(1, 0);
+const later = adjacency(edges, 0, 1), earlier = adjacency(edges, 1, 0);
+
+// The whole context graph: read edges (everything new in the room since the speaker last spoke there) and
+// memory edges (the speaker's own previous message, any room). Contact distance counts hand-offs: a read
+// costs 1, memory costs 0, so a meme an agent carries for weeks is still one hand-off from its source.
+const contextPairs = contextBuf ? new Uint32Array(contextBuf) : edges;
+const contextKinds = contextKindBuf ? new Uint8Array(contextKindBuf) : new Uint8Array(contextPairs.length / 2).fill(1);
+const contextLater = adjacency(contextPairs, 0, 1, contextKinds), contextEarlier = adjacency(contextPairs, 1, 0, contextKinds);
+const handoffs = new Int32Array(n).fill(0x7fffffff), deque = new Uint32Array(4 * n), touchedNodes = [];
+
+// Exact hand-offs from i to each target, by 0-1 breadth-first search (memory edges to the front of the
+// deque, reads to the back). Edges only run forward in time, so a path to an earlier target never passes
+// through anything older than it: the search prunes there, and ends once every target is settled.
+// A target missing from the result has no path at all.
+function contactDistances(i, targets, memoryCost) {
+  const result = new Map(), size = deque.length;
+  for (const [adj, side] of [[contextEarlier, -1], [contextLater, 1]]) {
+    const want = targets.filter(j => (stars[j * 4 + 2] - stars[i * 4 + 2]) * side >= 0 && j !== i);
+    if (!want.length) continue;
+    const bound = side < 0 ? Math.min(...want.map(j => stars[j * 4 + 2])) : Math.max(...want.map(j => stars[j * 4 + 2]));
+    const wanted = new Set(want);
+    let head = 0, tail = 0;
+    handoffs[i] = 0; touchedNodes.push(i); deque[tail++] = i;
+    while (head !== tail && wanted.size) {
+      const a = deque[head]; head = (head + 1) % size;
+      if (wanted.delete(a)) result.set(a, side * handoffs[a]);
+      for (let k = adj.start[a]; k < adj.start[a + 1]; k++) {
+        const b = adj.list[k];
+        if ((stars[b * 4 + 2] - bound) * side > 0) continue;
+        const w = adj.kind[k] === 0 ? memoryCost : 1, d = handoffs[a] + w;
+        if (d >= handoffs[b]) continue;
+        if (handoffs[b] === 0x7fffffff) touchedNodes.push(b);
+        handoffs[b] = d;
+        if (w === 0) { head = (head - 1 + size) % size; deque[head] = b; } else { deque[tail] = b; tail = (tail + 1) % size; }
+      }
+    }
+    for (const t of touchedNodes) handoffs[t] = 0x7fffffff;
+    touchedNodes.length = 0;
+  }
+  return result;
+}
 
 // cone per star: 0 the selected star, -h h hops into its past, +h h hops into its future, NONE outside
 const NONE = 1e4, MAX_HOPS = 40;
@@ -175,7 +224,7 @@ function lightCone(i) {
   if (params.has("reveal")) { uniforms.uFocus.value = 1; uniforms.uReveal.value = MAX_HOPS + 2; }   // captures skip the animation
   return { past, future };
 }
-function clearCone() { focusTarget = 0; }
+function clearCone() { focusTarget = 0; echoLines.visible = echoRings.visible = false; }
 let focusTarget = 0;
 
 // the selected star: a ring around it
@@ -189,6 +238,113 @@ const ring = new THREE.Points(ringGeometry, new THREE.ShaderMaterial({
 }));
 ring.visible = false;
 scene.add(ring);
+
+// echoes: the selected star's nearest neighbours in meaning, joined to it by a thread coloured by contact.
+// gold = within 2 hops of context (likely carried), white = 3 to 8 hops, violet = no contact within 8
+// (likely found independently), grey = the same speaker again
+const ECHO_K = 24, ECHO_MIN = 0.8;
+const echoIndex = echoIndexBuf && new Uint32Array(echoIndexBuf), echoSim = echoSimBuf && new Uint8Array(echoSimBuf);
+const CONTACT = { close: [1.0, 0.8, 0.35], near: [0.85, 0.85, 0.9], far: [0.45, 0.6, 0.85], none: [0.8, 0.45, 1.0],
+  self: [0.4, 0.4, 0.45] };
+const GROUPS = [["close", "in contact", "1 hand-off: one read the other, then or from memory"],
+  ["near", "near", "2 to 3 hand-offs: through intermediaries"], ["far", "distant", "4 or more hand-offs"],
+  ["none", "no contact", "no path through context: found independently"],
+  ["self", "itself", "the same speaker, from its own memory"]];
+// each echo is a ribbon from the selected star: a quad expanded in screen space, so its width is in pixels.
+// Width and brightness carry the strength of the connection (see strengthOf).
+const echoLineGeometry = new THREE.InstancedBufferGeometry();
+echoLineGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array([0, -1, 0, 1, -1, 0, 1, 1, 0, 0, 1, 0]), 3));
+echoLineGeometry.setIndex([0, 1, 2, 0, 2, 3]);
+const ribbon = { start: new Float32Array(ECHO_K * 3), end: new Float32Array(ECHO_K * 3), color: new Float32Array(ECHO_K * 3),
+  width: new Float32Array(ECHO_K) };
+echoLineGeometry.setAttribute("aStart", new THREE.InstancedBufferAttribute(ribbon.start, 3));
+echoLineGeometry.setAttribute("aEnd", new THREE.InstancedBufferAttribute(ribbon.end, 3));
+echoLineGeometry.setAttribute("aColor", new THREE.InstancedBufferAttribute(ribbon.color, 3));
+echoLineGeometry.setAttribute("aWidth", new THREE.InstancedBufferAttribute(ribbon.width, 1));
+const ribbonUniforms = { uResolution: { value: new THREE.Vector2(innerWidth, innerHeight) } };
+const echoLines = new THREE.Mesh(echoLineGeometry, new THREE.ShaderMaterial({
+  uniforms: ribbonUniforms, transparent: true, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: /* glsl */`
+    attribute vec3 aStart, aEnd, aColor; attribute float aWidth;
+    uniform vec2 uResolution;
+    varying vec3 vColor; varying float vSide, vAlong;
+    void main() {
+      vec4 a = projectionMatrix * modelViewMatrix * vec4(aStart, 1.0);
+      vec4 b = projectionMatrix * modelViewMatrix * vec4(aEnd, 1.0);
+      a.w = max(a.w, 0.01); b.w = max(b.w, 0.01);
+      vec2 dir = normalize((b.xy / b.w - a.xy / a.w) * uResolution + 1e-6);
+      vec4 p = mix(a, b, position.x);
+      p.xy += vec2(-dir.y, dir.x) * position.y * (aWidth + 2.0) / uResolution * p.w;   // 2 px of soft edge
+      gl_Position = p;
+      vColor = aColor; vSide = position.y * (aWidth + 2.0) / max(aWidth, 1.0); vAlong = position.x;
+    }`,
+  fragmentShader: /* glsl */`
+    varying vec3 vColor; varying float vSide, vAlong;
+    void main() {
+      float edge = clamp(1.0 - (abs(vSide) - 1.0) * 2.0, 0.0, 1.0);        // full across the width, soft outside
+      gl_FragColor = vec4(vColor, edge * mix(0.35, 1.0, vAlong));           // dimmer at the selected star
+    }`,
+}));
+echoLines.frustumCulled = false;
+const echoRingPos = new Float32Array(ECHO_K * 3), echoRingCol = new Float32Array(ECHO_K * 3);
+const echoRingGeometry = new THREE.BufferGeometry();
+echoRingGeometry.setAttribute("position", new THREE.BufferAttribute(echoRingPos, 3));
+echoRingGeometry.setAttribute("color", new THREE.BufferAttribute(echoRingCol, 3));
+const echoRings = new THREE.Points(echoRingGeometry, new THREE.ShaderMaterial({
+  transparent: true, depthTest: false, blending: THREE.AdditiveBlending,
+  vertexShader: `attribute vec3 color; varying vec3 vColor;
+    void main() { vColor = color; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); gl_PointSize = 26.0; }`,
+  fragmentShader: `varying vec3 vColor; void main() { float r = length(gl_PointCoord * 2.0 - 1.0);
+    gl_FragColor = vec4(vColor, exp(-pow((r - 0.75) * 10.0, 2.0))); }`,
+}));
+echoLines.visible = echoRings.visible = false;
+scene.add(echoLines, echoRings);
+
+// How strongly could j have been carried to (or from) i? Similarity above 0.8, times closeness through
+// fresh context (hops with no memory): 1 hop is full strength, falling by e every 3 hops. Reachable only
+// through an agent's memory: a faint floor. No path at all, or the same speaker: a hairline.
+function strengthOf(e) {
+  if (e.contact === "self" || e.contact === "none") return 0;
+  const similar = Math.min(1, Math.max(0, (e.sim - 0.8) / 0.2));
+  const close = e.hops === undefined ? 0.12 : Math.max(0.12, Math.exp(-(Math.abs(e.hops) - 1) / 3));
+  return (0.35 + 0.65 * similar) * close;
+}
+function contactOf(i, j, hops) {
+  if (rgbs[i * 4 + 3] === rgbs[j * 4 + 3]) return "self";
+  if (hops === undefined) return "none";
+  const h = Math.abs(hops);
+  return h <= 1 ? "close" : h <= 3 ? "near" : "far";
+}
+function showEchoes(i) {
+  if (!echoIndex) return [];
+  const list = [];
+  for (let k = 0; k < ECHO_K; k++) {
+    const j = echoIndex[i * ECHO_K + k], sim = echoSim[i * ECHO_K + k] / 255;
+    if (sim < ECHO_MIN) break;
+    list.push({ j, sim });
+  }
+  const other = list.filter(e => rgbs[e.j * 4 + 3] !== rgbs[i * 4 + 3]).map(e => e.j);
+  const handoffs = contactDistances(i, other, 0), hops = contactDistances(i, other, 1);
+  for (const e of list) {
+    e.handoffs = handoffs.get(e.j); e.hops = hops.get(e.j);
+    e.contact = contactOf(i, e.j, e.handoffs);
+    e.strength = strengthOf(e);
+  }
+  list.forEach((e, k) => {
+    const bright = 0.25 + 0.95 * e.strength;
+    ribbon.start.set(position.subarray(i * 3, i * 3 + 3), k * 3);
+    ribbon.end.set(position.subarray(e.j * 3, e.j * 3 + 3), k * 3);
+    ribbon.color.set(CONTACT[e.contact].map(v => v * bright), k * 3);
+    ribbon.width[k] = 1 + 9 * e.strength;
+    echoRingPos.set(position.subarray(e.j * 3, e.j * 3 + 3), k * 3);
+    echoRingCol.set(CONTACT[e.contact].map(v => v * bright), k * 3);
+  });
+  for (const g of [echoLineGeometry, echoRingGeometry]) for (const a of Object.values(g.attributes)) a.needsUpdate = true;
+  echoLineGeometry.instanceCount = list.length;
+  echoRingGeometry.setDrawRange(0, list.length);
+  echoLines.visible = echoRings.visible = list.length > 0;
+  return list.sort((a, b) => stars[a.j * 4 + 2] - stars[b.j * 4 + 2]);
+}
 
 // camera: position plus yaw and pitch; wheel flies along the view, left drag looks, right drag pans
 const cam = { x: 0, y: 0, z: 80, yaw: 0, pitch: 0 };
@@ -204,7 +360,13 @@ function applyCamera() {
   camera.position.set(cam.x, cam.y, cam.z);
   camera.lookAt(camera.position.clone().add(forward()));
 }
-function touched() { autopilot = false; lastInput = performance.now(); }
+function touched() { autopilot = false; lastInput = performance.now(); camGoal = null; }
+// glide to look at star i from a little nearer the present
+let camGoal = null;
+function flyTo(i) {
+  autopilot = false; lastInput = performance.now();
+  camGoal = { x: position[i * 3], y: position[i * 3 + 1], z: position[i * 3 + 2] + 45, yaw: 0, pitch: 0 };
+}
 
 const canvas = renderer.domElement;
 let drag = null;
@@ -268,6 +430,7 @@ async function open(i) {
   ringGeometry.attributes.position.needsUpdate = true;
   ring.visible = true;
   const { past, future } = lightCone(i);
+  const echoes = showEchoes(i);
   const s = Math.floor(i / meta.shard);
   if (!shards.has(s)) shards.set(s, fetch(`data/text/${String(s).padStart(4, "0")}.json`).then(r => r.json()));
   const t = (await shards.get(s))[i % meta.shard];
@@ -279,9 +442,55 @@ async function open(i) {
     textContent: `${t.time} UTC · #${t.room} · read by ${reads[i]} later turns` });
   panel.append(who, metaLine, Object.assign(document.createElement("div"), { className: "text", textContent: t.text }),
     coneSummary("past cone", "could have shaped it", past, "back to", "#ffc773"),
-    coneSummary("future cone", "it could have reached", future, "out to", "#8cccff"));
+    coneSummary("future cone", "it could have reached", future, "out to", "#8cccff"),
+    echoList(i, echoes));
   panel.style.display = "block";
   panel.scrollTop = 0;
+}
+
+// the echoes, in time order, each with its contact: how many hops of context lie between the two turns
+const textOf = async j => {
+  const s = Math.floor(j / meta.shard);
+  if (!shards.has(s)) shards.set(s, fetch(`data/text/${String(s).padStart(4, "0")}.json`).then(r => r.json()));
+  return (await shards.get(s))[j % meta.shard];
+};
+const rgbOf = c => `rgb(${c.map(v => Math.round(v * 255)).join(",")})`;
+function echoList(i, echoes) {
+  const box = Object.assign(document.createElement("div"), { className: "echoes" });
+  if (!echoes.length) { box.textContent = echoIndex ? "no echoes: nothing else this similar (0.80)" : ""; return box; }
+  box.append(Object.assign(document.createElement("div"), { className: "head",
+    textContent: `echoes · ${echoes.length} messages similar in meaning, grouped by hand-offs between them` }));
+  for (const [key, name, gloss] of GROUPS) {
+    const members = echoes.filter(e => e.contact === key);
+    if (!members.length) continue;
+    const group = document.createElement("details");
+    group.className = "group";
+    group.open = key !== "self";
+    const summary = document.createElement("summary");
+    summary.innerHTML = `<span class="count"></span> <span class="name"></span> <span class="gloss"></span>`;
+    summary.querySelector(".count").textContent = members.length;
+    summary.querySelector(".name").textContent = name;
+    summary.querySelector(".name").style.color = rgbOf(CONTACT[key]);
+    summary.querySelector(".gloss").textContent = gloss;
+    group.append(summary);
+    for (const { j, sim, hops, handoffs } of members) {
+      const item = Object.assign(document.createElement("div"), { className: "echo" });
+      const when = stars[j * 4 + 2] < stars[i * 4 + 2] ? "earlier" : "later";
+      const h = Math.abs(handoffs), distance = handoffs === undefined ? "" : (h === 0 ? " · same thread"
+        : ` · ${h} hand-off${h > 1 ? "s" : ""}`) + (hops === undefined ? "" : ` · ${Math.abs(hops)} hops fresh`);
+      const line = Object.assign(document.createElement("div"), { className: "line" });
+      const snip = Object.assign(document.createElement("div"), { className: "snip" });
+      item.append(line, snip);
+      item.addEventListener("click", () => { flyTo(j); open(j); });
+      group.append(item);
+      textOf(j).then(t => {
+        line.textContent = `${sim.toFixed(2)} · ${t.speaker} · ${t.time.slice(0, 16)} · ${when}${distance}`;
+        snip.textContent = t.text.length > 180 ? t.text.slice(0, 180) + "…" : t.text;
+      });
+    }
+    box.append(group);
+  }
+  return box;
 }
 
 // who is in a cone: turns, speakers by count, and how far in time it reaches
@@ -308,6 +517,7 @@ function coneSummary(title, verb, list, reach, tint) {
 }
 
 addEventListener("resize", () => {
+  ribbonUniforms.uResolution.value.set(innerWidth, innerHeight);
   renderer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
@@ -326,6 +536,9 @@ renderer.setAnimationLoop(now => {
     const goal = { z: 80 - DEPTH * 0.55 * (1 - Math.cos(p)), x: 25 * Math.sin(p * 1.7), y: 15 * Math.sin(p * 1.1),
       yaw: 0.12 * Math.sin(p * 1.3), pitch: 0.08 * Math.sin(p * 0.9) };
     for (const key in goal) cam[key] += (goal[key] - cam[key]) * ease;
+  } else if (camGoal) {
+    const ease = 1 - Math.exp(-dt * 2.5);
+    for (const key in camGoal) cam[key] += (camGoal[key] - cam[key]) * ease;
   }
   // the cone fades in, and its wavefront walks out a few hops a second
   const f = uniforms.uFocus;

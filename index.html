@@ -21,6 +21,15 @@
   #panel .text { white-space: pre-wrap; word-break: break-word; }
   #panel .cone { margin-top: 16px; padding: 10px 12px; border-left: 2px solid; color: var(--dim); font-size: 13px; }
   #panel .cone .head { margin-bottom: 4px; }
+  #panel .echoes { margin-top: 18px; font-size: 13px; }
+  #panel .echoes .head { color: var(--dim); margin-bottom: 6px; }
+  #panel .echo { padding: 7px 9px; border-radius: 8px; cursor: pointer; }
+  #panel .echo:hover { background: rgba(255, 255, 255, 0.06); }
+  #panel .echo .snip { color: var(--ink); opacity: 0.75; margin-top: 2px; }
+  #panel .group { margin: 6px 0; }
+  #panel .group summary { cursor: pointer; padding: 4px 0; color: var(--dim); }
+  #panel .group summary .count { color: var(--ink); }
+  #panel .group .echo { margin-left: 10px; }
   body.hide-ui #hud, body.hide-ui #when, body.hide-ui #keys { display: none; }
 </style>
 </head>

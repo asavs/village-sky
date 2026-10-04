@@ -6,7 +6,11 @@ message in the same order as messages.jsonl). Writes into data/:
   stars.bin   per star, float32 x, y, days (since the first message), reads (how many later messages had it in context)
   colors.bin  per star, uint8 r, g, b, speaker index
   edges.bin   uint32 pairs (earlier, later): the speaker's previous message (chain) and the last few
-              messages in the room since then (read)
+              messages in the room since then (read); drawn, and walked for the light cones
+  context.bin uint32 pairs (earlier, later): everything new in the room since the speaker last spoke
+              there, up to 50 (read), and the speaker's previous message in any room (memory); used for
+              contact distance, where memory costs no hand-off
+  context_kinds.bin  uint8 per context pair: 0 memory, 1 read
   meta.json   speakers, colours, rooms, time range, counts
   text/NNNN.json  message text in shards of 2,000 stars, fetched when a star is opened
 
@@ -66,8 +70,10 @@ from datetime import datetime
 t0 = datetime.fromisoformat(items[0][0]["time"])
 days = np.array([(datetime.fromisoformat(m["time"]) - t0).total_seconds() / 86400 for m, _ in items], np.float32)
 edges = []
+context = []
 reads = np.zeros(n, np.float32)
 last_by = {}           # (speaker, room) -> index
+last_any = {}          # speaker -> index, in any room
 room_log = {}          # room -> list of indices
 for i, (m, _) in enumerate(items):
     log = room_log.setdefault(m["room"], [])
@@ -78,6 +84,10 @@ for i, (m, _) in enumerate(items):
     for j in new:
         reads[j] += 1                  # influence counts the whole context, edges draw only the latest
     edges.extend((j, i, 1) for j in new[-recent:])
+    context.extend((j, i, 1) for j in new)
+    if m["speaker"] in last_any and m["speaker"] != "human":     # humans share one name, not one memory
+        context.append((last_any[m["speaker"]], i, 0))
+    last_any[m["speaker"]] = i
     last_by[(m["speaker"], m["room"])] = i
     log.append(i)
 
@@ -87,10 +97,12 @@ cols = np.array([[*(int(255 * c) for c in speaker_colour[m["speaker"]]), speaker
 cols.tofile(os.path.join(out, "colors.bin"))
 np.array([(a, b) for a, b, _ in edges], np.uint32).tofile(os.path.join(out, "edges.bin"))
 np.array([k for _, _, k in edges], np.uint8).tofile(os.path.join(out, "edge_kinds.bin"))
+np.array([(a, b) for a, b, _ in context], np.uint32).tofile(os.path.join(out, "context.bin"))
+np.array([k for _, _, k in context], np.uint8).tofile(os.path.join(out, "context_kinds.bin"))
 for s in range(0, n, SHARD):
     shard = [{"id": m["id"], "time": m["time"], "speaker": m["speaker"], "room": m["room"], "text": t} for m, t in items[s:s + SHARD]]
     json.dump(shard, open(os.path.join(out, "text", "%04d.json" % (s // SHARD)), "w", encoding="utf-8"), ensure_ascii=False)
 json.dump({"count": n, "edges": len(edges), "shard": SHARD, "first": items[0][0]["time"], "last": items[-1][0]["time"],
            "days": float(days[-1]), "speakers": [{"name": s, "color": speaker_colour[s]} for s in speakers]},
           open(os.path.join(out, "meta.json"), "w"), indent=1)
-print("stars", n, "edges", len(edges), "speakers", len(speakers), "days %.1f" % days[-1], "max reads", int(reads.max()))
+print("stars", n, "edges", len(edges), "context", len(context), "speakers", len(speakers), "days %.1f" % days[-1], "max reads", int(reads.max()))
