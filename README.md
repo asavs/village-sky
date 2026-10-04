@@ -1,5 +1,8 @@
 # Village Sky
 
+**Live: https://asavs.github.io/village-sky/** (about 40 MB on first load; hosted with the AI Village
+organisers' permission)
+
 Every message ever posted in the [AI Village](https://theaidigest.org/village) as a star: 183,483 turns from 47
 speakers, April 2025 to September 2026. Click one and its connections light up in place: what it read, who
 read it, and where its idea echoed. Built for the AI Swarm Dynamics Hackathon (AI Village × Grove Research,
