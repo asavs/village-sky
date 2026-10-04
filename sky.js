@@ -156,14 +156,17 @@ const cone = new Float32Array(n).fill(NONE), mark = new Float32Array(n);
 const coneAttr = new THREE.BufferAttribute(cone, 1), markAttr = new THREE.BufferAttribute(mark, 1);
 geometry.setAttribute("cone", coneAttr);
 geometry.setAttribute("mark", markAttr);
+const hit = new Float32Array(n), hitAttr = new THREE.BufferAttribute(hit, 1);
+geometry.setAttribute("hit", hitAttr);
 
 const uniforms = { uTime: { value: 0 }, uPx: { value: 1 }, uSize: { value: 0.45 }, uFog: { value: 160 },
-  uFocus: { value: 0 }, uReveal: { value: 0 }, uSolo: { value: 0 }, uDim: { value: 0.14 } };
+  uFocus: { value: 0 }, uReveal: { value: 0 }, uSolo: { value: 0 }, uDim: { value: 0.14 },
+  uSearch: { value: 0 } };
 const starMaterial = new THREE.ShaderMaterial({
   uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
   vertexShader: /* glsl */`
-    attribute vec3 color; attribute float reads, cone, mark;
-    uniform float uTime, uPx, uSize, uFog, uFocus, uReveal, uSolo, uDim;
+    attribute vec3 color; attribute float reads, cone, mark, hit;
+    uniform float uTime, uPx, uSize, uFog, uFocus, uReveal, uSolo, uDim, uSearch;
     varying vec3 vColor; varying float vBright;
     void main() {
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
@@ -175,17 +178,20 @@ const starMaterial = new THREE.ShaderMaterial({
       float front = lit * exp(-pow((uReveal - hops) * 1.2, 2.0));           // the wavefront flares as it passes
       float marked = step(0.5, mark);
       float grow = mix(mix(1.0, mix(1.0, 1.0 + exp(-hops / 6.0), lit), uFocus), mix(0.8, 1.6, marked), uSolo);
+      grow *= mix(1.0, mix(0.9, 1.7, hit), uSearch);
       float px = grow * uSize * (0.7 + reads / 10.0) * uPx / max(-mv.z, 0.1);
       float fog = 1.0 / (1.0 + pow(-mv.z / uFog, 2.0));   // the far past is a haze, not a pile-up
       fog = mix(fog, sqrt(fog), max(lit * uFocus, marked * uSolo));
+      fog = mix(fog, 1.0, hit * uSearch);                     // matches shine through the haze
       float weight = lit * (0.12 + 1.6 * exp(-hops / 5.0)) + front * 1.5;       // near hops blaze, the far cone glows
       float cone_ = mix(1.0, mix(0.07, weight, lit), uFocus);
       float solo = mix(uDim * (1.0 + 2.2 * lit * exp(-hops / 5.0)), 1.8, marked);   // solo: connections, its cone, the sky
-      vBright = mix(cone_, solo, uSolo) * twinkle * fog * min(1.0, (px * px) / 9.0);
+      float found = mix(mix(cone_, solo, uSolo), mix(0.16, 2.2, hit), uSearch * (1.0 - marked * uSolo));   // search
+      vBright = found * twinkle * fog * mix(min(1.0, (px * px) / 9.0), 1.0, hit * uSearch);
       gl_PointSize = clamp(px, 3.0, 96.0);
       vec3 tint = cone < 0.0 ? vec3(1.0, 0.78, 0.45) : vec3(0.55, 0.8, 1.0);   // past warm, future cool
       vColor = mix(color, tint, 0.5 * lit * uFocus * step(0.5, hops) * (1.0 - uSolo));
-      vColor = mix(vColor, vec3(dot(vColor, vec3(0.3, 0.55, 0.15))), 0.5 * uSolo * (1.0 - marked));   // the rest, half grey
+      vColor = mix(vColor, vec3(dot(vColor, vec3(0.3, 0.55, 0.15))), 0.5 * max(uSolo * (1.0 - marked), uSearch * (1.0 - hit)));   // the rest, half grey
     }`,
   fragmentShader: /* glsl */`
     varying vec3 vColor; varying float vBright;
@@ -447,7 +453,9 @@ canvas.addEventListener("wheel", e => {
 }, { passive: false });
 
 addEventListener("keydown", e => {
+  if (e.target === searchBox) return;
   const k = e.key.toLowerCase();
+  if (k === "/") { e.preventDefault(); searchBox.focus(); searchBox.select(); return; }
   if (k === "l") lines.visible = !lines.visible;
   else if (k === "a") { autopilot = !autopilot; pilotTime = 0; }
   else if (k === "h") document.body.classList.toggle("hide-ui");
@@ -484,6 +492,45 @@ function pick(sx, sy) {
   }
   if (best >= 0) focus(best);
 }
+
+// Search streams through the text shards (fetched once, then cached), lighting matches as each shard
+// arrives: case-insensitive, every word must appear. Enter in the box opens the first match; Esc clears.
+const searchBox = document.getElementById("search"), searchCount = document.getElementById("found");
+let searchRun = 0, searchTarget = 0, hits = [];
+const shardOf = s => {
+  if (!shards.has(s)) shards.set(s, fetch(`data/text/${String(s).padStart(4, "0")}.json`).then(r => r.json()));
+  return shards.get(s);
+};
+async function search(query) {
+  const run = ++searchRun, words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  hit.fill(0); hitAttr.needsUpdate = true; hits = [];
+  searchTarget = words.length ? 1 : 0;
+  searchCount.textContent = "";
+  if (!words.length) return;
+  const count = Math.ceil(n / meta.shard);
+  let next = 0, done = 0;
+  const worker = async () => {
+    while (next < count && run === searchRun) {
+      const s = next++, rows = await shardOf(s);
+      if (run !== searchRun) return;
+      rows.forEach((r, k) => {
+        const text = r.lowerText ??= `${r.speaker} ${r.text}`.toLowerCase();
+        if (words.every(w => text.includes(w))) { hit[s * meta.shard + k] = 1; hits.push(s * meta.shard + k); }
+      });
+      hitAttr.needsUpdate = true;
+      done++;
+      searchCount.textContent = `${hits.length.toLocaleString()} found` + (done < count ? ` · ${Math.round(100 * done / count)}%` : "");
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+}
+let searchTimer = 0;
+searchBox.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => search(searchBox.value), 250); });
+searchBox.addEventListener("keydown", e => {
+  if (e.key === "Escape") { searchBox.value = ""; search(""); searchBox.blur(); }
+  else if (e.key === "Enter" && hits.length) { searchBox.blur(); focus(Math.min(...hits)); }
+});
+if (params.has("q")) { searchBox.value = params.get("q"); search(searchBox.value); }
 
 const textOf = async j => {
   const s = Math.floor(j / meta.shard);
@@ -933,6 +980,7 @@ renderer.setAnimationLoop(now => {
   // the cone fades in and its wavefront walks out a few hops a second; solo fades everything but connections
   uniforms.uFocus.value = ease(uniforms.uFocus.value, focusTarget, dt, 4);
   uniforms.uSolo.value = ease(uniforms.uSolo.value, soloTarget, dt, 3);
+  uniforms.uSearch.value = ease(uniforms.uSearch.value, searchTarget, dt, 3);
   if (focusTarget) uniforms.uReveal.value = Math.min(MAX_HOPS + 2, uniforms.uReveal.value + dt * 7);
   else if (uniforms.uFocus.value < 0.01) coneLines.visible = false;
   uniforms.uFog.value = selected >= 0 ? Math.max(160, focusDistance * 3) : 160;

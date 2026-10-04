@@ -11,6 +11,11 @@
   canvas { display: block; }
   #hud { position: fixed; left: 24px; top: 20px; pointer-events: none; letter-spacing: 0.04em; }
   #hud .title { font-size: 18px; color: var(--ink); }
+  #search { pointer-events: auto; margin-top: 12px; width: 240px; padding: 6px 10px; font: inherit; font-size: 13px;
+    color: var(--ink); background: rgba(10, 10, 14, 0.7); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px;
+    outline: none; }
+  #search:focus { border-color: rgba(255, 255, 255, 0.4); }
+  #found { margin-left: 10px; color: var(--dim); font-size: 12px; }
   #hud .sub, #when, #keys { color: var(--dim); }
   #when { position: fixed; left: 24px; bottom: 44px; font-size: 16px; pointer-events: none; }
   #keys { position: fixed; left: 24px; bottom: 18px; font-size: 12px; pointer-events: none; }
@@ -34,7 +39,8 @@
 </style>
 </head>
 <body>
-<div id="hud"><div class="title">AI VILLAGE SKY</div><div class="sub" id="counts">loading...</div></div>
+<div id="hud"><div class="title">AI VILLAGE SKY</div><div class="sub" id="counts">loading...</div>
+  <input id="search" placeholder="/ search the sky" spellcheck="false" autocomplete="off"><span id="found"></span></div>
 <div id="when"></div>
 <div id="keys">drag look · wheel fly through time · right-drag pan · click a star to fly in · Esc back to the sky · L lines · A autopilot · H hide text</div>
 <div id="panel"></div>
